@@ -8,12 +8,13 @@ This is the reference for the Skydo adapter: what it does, how to set it up, and
 
 - **Skydo has no public developer API, SDK or webhooks** (checked 2026-10-29). There is no API reference, no sandbox and no API keys. Skydo's own FAQ says website checkout is "currently ... not available".
 - **An API is on Skydo's roadmap.** The Series A announcement (10 Dec 2025) says Skydo will roll out "developer-friendly APIs and webhooks". No date has been given, and nothing had launched as of 2026-10-29.
-- **Skydo's Terms of Use forbid automating the dashboard** (§25.8.12 bans scraping, robots and deep-links; §25.8.2 and §37.6 ban reverse engineering). This project does not log in to Skydo, scrape it, or call `api.skydo.com`.
+- **Skydo's Terms of Use prohibit scrapers, bots and other automated access to the platform** (clause 13, "Restrictions on the use of the Platform", in the version of 09 Apr 2026). This project does not log in to Skydo, scrape it, or call `api.skydo.com`.
 - **What the adapter automates instead** are the two paths Skydo itself supports:
   1. **Zoho Books bridge.** Skydo's native Zoho Books integration imports new Zoho invoices. When the money arrives, Skydo marks the invoice paid in Zoho and attaches the FIRA. The adapter creates invoices and reads their status through Zoho's public API.
   2. **Receiving accounts + ledger.** The adapter gives your client your standing Skydo receiving-account details, with the order reference as the payment reference, and tracks the expected payment in a local JSON ledger. You record each receipt when Skydo notifies you.
+- **Not yet proven end to end.** Skydo documents that invoices created in Zoho sync automatically, but not specifically whether invoices created through the Zoho API are included. Confirm it with one real invoice during setup ([step 6](#step-6-configure-and-check)). The adapter has been reviewed against Zoho's OpenAPI files and Skydo's pages in two rounds, but has not yet run against a real Skydo account.
 
-The search behind these statements, with every URL checked, is in [research/verification/skydo-api-search.md](research/verification/skydo-api-search.md).
+The search behind these statements is in [research/verification/skydo-api-search.md](research/verification/skydo-api-search.md); the adversarial review of the adapter is in [research/verification/round2-skydo.md](research/verification/round2-skydo.md).
 
 Capability map (from `src/providers/skydo/capabilities.ts`):
 
@@ -22,7 +23,7 @@ Capability map (from `src/providers/skydo/capabilities.ts`):
 | createPayment | Partial | Zoho invoice (Zoho bridge) or bank-transfer instructions + ledger entry (ledger mode). Never calls Skydo |
 | verifyPayment | Partial | No callback exists. Reads the Zoho invoice (`verifiedVia: "status_api"`) or the ledger (`verifiedVia: "manual_record"`) |
 | paymentStatus | Partial | Zoho invoice status, or the ledger |
-| refund, refundStatus | No | No API. Refunds go through Skydo support |
+| refund, refundStatus | No | No API. Skydo's FAQ says it cannot initiate a refund directly once a payment is settled |
 | webhooks | No | No API. Skydo notifies you by email/WhatsApp |
 | customers, subscriptions, settlements, payouts, paymentLinks | No | See [Limits](#7-limits) |
 
@@ -46,7 +47,7 @@ Rules the adapter enforces:
 
 - Setting only some of the six `ZOHO_*` variables is an error (`CONFIG_MISSING`, listing the missing ones). `ZOHO_ACCOUNTS_URL` is optional and not one of the six.
 - If neither mode is configured, creating the Skydo gateway fails with `CONFIG_MISSING`.
-- **With both configured, the Zoho bridge is used.** If a receiving account matches the invoice currency (or a `"*"` fallback exists), the transfer instructions are also written into the invoice's `notes`.
+- **With both configured, the Zoho bridge is used.** If a receiving account matches the invoice currency (or a `"*"` fallback exists), the transfer instructions are also written into the invoice's `notes`. The ledger is not used in Zoho mode.
 - `SKYDO_PAYEE_NAME` (optional) adds "to <your business name>" to the instructions.
 - **There is no Skydo or Zoho sandbox in this adapter.** `PAYMENTS_MODE=sandbox` and `live` behave the same for Skydo. With the `ZOHO_*` variables set, `sandbox` creates real invoices in your Zoho organisation, and Skydo imports them. Use `PAYMENTS_MODE=mock` to try the flow, or point the variables at a Zoho organisation that is not connected to Skydo.
 
@@ -54,12 +55,12 @@ Rules the adapter enforces:
 
 ## 3. Setup: Zoho Books bridge
 
-You need a Zoho Books organisation and a Skydo account in the same business name.
+You need a Zoho Books organisation and a Skydo account for the same business.
 
 ### Step 1. Connect Skydo to Zoho (in Skydo)
 
 1. In the Skydo dashboard, open your profile and choose **Connect Skydo to Zoho**, then **Connect Securely**. Sign in to Zoho and pick the organisation you will set as `ZOHO_ORGANIZATION_ID`.
-2. Choose whether Skydo imports invoices in **all currencies** or **international only**. Either works for this adapter, because it only creates foreign-currency invoices.
+2. Choose whether Skydo imports invoices in **all currencies** or **international only**. The adapter only creates foreign-currency invoices, so either setting should include them.
 3. Skydo imports **only invoices created after you connect**. Earlier invoices never appear in Skydo.
 
 Skydo syncs with Zoho about every 10 minutes. In one direction it imports new invoices; in the other it marks the matching invoice paid and uploads the FIRA PDF to it.
@@ -78,8 +79,9 @@ The adapter writes one line per invoice: `name` = the payment `description` (cut
 1. If the client's currency is not yet enabled, add it in Zoho Books > **Settings** > **Currencies**.
 2. Zoho Books > **Sales** > **Customers** > **New**:
    - **Currency**: the client's billing currency (USD, GBP, EUR, ...). Zoho raises invoices in the customer's currency, so the adapter refuses a payment whose currency differs from the customer's.
-   - **Email** of the primary contact person: the adapter finds the customer by this address (`GET /contacts?email=...&contact_type=customer`, exact match). Alternatively pass the customer's id as `providerOptions.zohoCustomerId`.
+   - **Email** of the primary contact person: the adapter finds the customer by this address (`GET /contacts?email=...&contact_type=customer`, then an exact, case-insensitive re-check). If two active customers share the address, or the only match is inactive, it refuses to guess. Alternatively pass the customer's id as `providerOptions.zohoCustomerId`.
    - **GST Treatment**: **Overseas**, if your Zoho organisation is Indian.
+3. **Turn off Zoho online payment gateways** for these customers or invoices. Otherwise a client can pay on the Zoho invoice page, outside Skydo, and you get no FIRA.
 
 The adapter never creates or edits customers. It only needs read access to contacts.
 
@@ -91,7 +93,7 @@ The adapter never creates or edits customers. It only needs read access to conta
    - Scope: `ZohoBooks.invoices.ALL,ZohoBooks.contacts.READ`
    - Time duration: the longest offered (the code is single-use and expires after this time)
    - A description, then **Create**, and select your Zoho Books organisation if asked.
-4. Copy the code and exchange it for a refresh token straight away, on the **accounts host of your data center**:
+4. Copy the code and exchange it for a refresh token straight away, on the **accounts host of your data center** (table below):
 
    ```bash
    curl -X POST "https://accounts.zoho.in/oauth/v2/token" \
@@ -101,7 +103,7 @@ The adapter never creates or edits customers. It only needs read access to conta
      -d code="<the code from step 3>"
    ```
 
-   The JSON response contains `refresh_token`, `access_token`, `api_domain` and `expires_in`. Put `refresh_token` in `ZOHO_REFRESH_TOKEN`. If the response is `{"error":"invalid_code"}`, the code expired or was already used: generate a new one. `{"error":"invalid_client"}` usually means you used another data center's accounts host.
+   The JSON response contains `refresh_token`, `access_token`, `api_domain` and `expires_in`. Put `refresh_token` in `ZOHO_REFRESH_TOKEN`. If the response is `{"error":"invalid_code"}`, the code expired or was already used: generate a new one. `{"error":"invalid_client"}` usually means a wrong client id/secret, or another data center's accounts host.
 
 Data centers (`ZOHO_DATA_CENTER` is the domain your `books.zoho.*` URL ends with):
 
@@ -115,10 +117,13 @@ Data centers (`ZOHO_DATA_CENTER` is the domain your `books.zoho.*` URL ends with
 | `ca` | `https://accounts.zohocloud.ca` | `https://www.zohoapis.ca` |
 | `com.cn` | `https://accounts.zoho.com.cn` | `https://www.zohoapis.com.cn` |
 | `sa` | `https://accounts.zoho.sa` | `https://www.zohoapis.sa` |
+| `ae` | `https://accounts.zoho.ae` | `https://www.zohoapis.ae` |
+| `uk` | `https://accounts.zoho.uk` | `https://www.zohoapis.uk` |
+| `sg` | `https://accounts.zoho.sg` | `https://www.zohoapis.sg` |
 
-For a region not in this list, set `ZOHO_ACCOUNTS_URL` to its accounts host. The adapter switches to the `api_domain` that Zoho returns with each access token.
+For a region not in this list, set `ZOHO_ACCOUNTS_URL` to its accounts host. The adapter always switches to the `api_domain` that Zoho returns with the access token.
 
-At runtime the adapter exchanges the refresh token for an access token (valid one hour), refreshes it 5 minutes before expiry, and refreshes once more if Zoho rejects a token as expired.
+At runtime the adapter exchanges the refresh token for an access token (valid one hour), caches it, refreshes it 5 minutes before expiry, and refreshes once more if Zoho rejects a token as expired. Zoho issues at most 10 access tokens per refresh token in 10 minutes; hitting that limit gives `RATE_LIMITED`.
 
 ### Step 5. Organization ID (Zoho Books)
 
@@ -128,7 +133,7 @@ Zoho Books > **Settings** > **Organization Profile** > **Organization ID**. This
 
 ```bash
 ZOHO_DATA_CENTER=in
-ZOHO_CLIENT_ID=1000.XXXXXXXXXXXXXXXXXXXX
+ZOHO_CLIENT_ID=1000.ABC123...
 ZOHO_CLIENT_SECRET=...
 ZOHO_REFRESH_TOKEN=1000....
 ZOHO_ORGANIZATION_ID=60012345678
@@ -140,7 +145,9 @@ SKYDO_PAYEE_NAME=Acme Exports Pvt Ltd
 
 Run `npx india-payments-mcp doctor` (or the `payments_check_config` tool). Every Skydo variable is optional, so Skydo always shows `ready: true`; a configuration problem shows up as `initError`. Token problems only appear on the first Zoho call.
 
-Then create one real invoice for a test client and confirm it appears in the Skydo dashboard within about 10 minutes.
+**Then create one real invoice** for a test client with `payments_create_payment` and confirm it appears in the Skydo dashboard within about 10 minutes. This is the step that proves Skydo imports API-created invoices for your account.
+
+If your Zoho organisation's base currency differs from the invoice currency and Zoho rejects the invoice, pass `providerOptions.exchangeRate` (or turn on Zoho's automatic exchange-rate feed).
 
 ---
 
@@ -148,7 +155,7 @@ Then create one real invoice for a test client and confirm it appears in the Sky
 
 ### Step 1. Copy your receiving accounts
 
-In the Skydo dashboard, open **International Accounts**. Skydo gives each merchant standing local accounts (USD, GBP, EUR, CAD, AUD, AED, SGD) and a SWIFT account for other currencies. The details do not change per invoice, so printing them with a unique reference is what Skydo recommends.
+In the Skydo dashboard, open **International Accounts**. Skydo gives each merchant standing local accounts (USD, GBP, EUR, CAD, AUD, AED, SGD) and a SWIFT account (32 currencies). The details do not change per invoice, so printing them with a unique reference is what Skydo recommends.
 
 ### Step 2. Write `SKYDO_RECEIVING_ACCOUNTS`
 
@@ -183,17 +190,20 @@ The value is either inline JSON or a path to a `.json` file. It must be a non-em
 ]
 ```
 
-A payment in a currency with no matching account and no `"*"` entry fails with `CONFIG_MISSING`.
+Replace every `<...>` placeholder: a value containing `<...>` is treated as unset. A payment in a currency with no matching account and no `"*"` entry fails with `CONFIG_MISSING`.
 
 ### Step 3. Choose where the ledger lives
 
-`SKYDO_LEDGER_FILE` defaults to `~/.india-payments-mcp/skydo-ledger.json`. The file is created on the first payment, written atomically (temporary file, then rename) with mode `0600`, and read when the gateway starts, so state survives restarts. If it is not valid JSON, the gateway refuses to start rather than overwrite it.
+`SKYDO_LEDGER_FILE` defaults to `~/.india-payments-mcp/skydo-ledger.json`.
 
-Run one server process per ledger file. There is no locking, so two processes writing the same file can lose updates.
+- The file is created on the first payment, with mode `0600` in a `0700` directory.
+- Every change is a locked read-modify-write: the adapter takes an exclusive lock file (`<ledger>.lock`), re-reads the ledger, applies the one change, and writes it atomically (temporary file, then rename). Reads always read the file. So **your app and the MCP server can share one ledger file**, for example the app creating orders and the MCP server recording receipts.
+- A lock left behind by a crashed process is removed after 30 seconds. If the lock cannot be taken within 5 seconds, the call fails with `PROVIDER_UNAVAILABLE` ("locked by another process").
+- If the file is not valid JSON, the gateway refuses to start rather than overwrite it.
 
 ### Step 4. Check
 
-Run `npx india-payments-mcp doctor`. As with Zoho, a malformed `SKYDO_RECEIVING_ACCOUNTS` shows up as `initError`.
+Run `npx india-payments-mcp doctor`. As with Zoho, a malformed `SKYDO_RECEIVING_ACCOUNTS` or ledger file shows up as `initError`.
 
 ---
 
@@ -248,7 +258,7 @@ Ledger mode result (`raw` stripped, as the MCP server returns it):
   "currency": "USD",
   "checkout": {
     "type": "manual",
-    "instructions": "Please pay USD 1250.00 by bank transfer to Acme Exports Pvt Ltd.\nPayment reference (include it in the transfer note): INV_2026_041\n\nUS account (ACH / Fedwire)\nAccount holder: Acme Exports Pvt Ltd\nBank: ...\nAccount number: ...\nACH routing number: ...\n\nPayments are received through Skydo (skydo.com) and settled to India with a FIRA.\n\nWhen Skydo notifies you that the money arrived, record it (MCP: payments_skydo_record_payment; SDK: client.skydoRecordPayment)."
+    "instructions": "Please pay USD 1250.00 by bank transfer to Acme Exports Pvt Ltd.\nPayment reference (include it in the transfer note): INV_2026_041\n\nUS account (ACH / Fedwire)\nAccount holder: Acme Exports Pvt Ltd\nBank: ...\nAccount number: ...\nACH routing number: ...\n\nPayments are received through Skydo (skydo.com) and settled to India with a FIRA.\n\nWhen Skydo notifies you that the money arrived, record it (MCP: payments_skydo_record_payment; SDK: client.skydoRecordPayment) with the Skydo transaction reference as receiptId."
   }
 }
 ```
@@ -269,19 +279,22 @@ Zoho bridge result:
   "checkout": {
     "type": "manual",
     "url": "https://books.zoho.in/...",
-    "instructions": "Zoho Books invoice INV-000041 is ready for USD 1250.00.\nSkydo imports it within about 10 minutes (Skydo dashboard > Connect Skydo to Zoho must be done once), then marks it paid in Zoho and attaches the FIRA when the money arrives.\nShare the invoice link with your client: https://books.zoho.in/..."
+    "instructions": "Zoho Books invoice INV-000041 is ready for USD 1250.00.\nSkydo imports Zoho invoices about every 10 minutes (Skydo profile > Connect Skydo to Zoho, done once), marks the invoice paid when the money arrives, and attaches the FIRA.\nInvoice link for your client: https://books.zoho.in/..."
   }
 }
 ```
 
-`url` is Zoho's `invoice_url` when Zoho returns one.
+`url` is Zoho's `invoice_url` when Zoho returns one. For currencies other than USD, the instructions end with a reminder that Skydo's minimum is the USD 50 equivalent; for GBP with an orderRef longer than 18 characters, with a warning that UK transfers often cut references to 18 characters.
 
 What the Zoho bridge does on create:
 
-1. Looks for a non-void invoice with `reference_number` = orderRef. If one exists with the same amount and currency, it is returned (no duplicate invoice). With a different amount or currency, the call fails with `VALIDATION`.
-2. Finds the customer: `providerOptions.zohoCustomerId` if given, otherwise `customer.email`. The customer's currency must equal the payment currency.
+1. Looks up every invoice with `reference_number` = orderRef (all pages, exact match).
+   - A non-void invoice with the same amount and currency is returned (no duplicate invoice). With a different amount or currency, the call fails with `VALIDATION`.
+   - If the only match is void, the call fails with `VALIDATION`: use a new orderRef.
+2. Otherwise finds the customer (`providerOptions.zohoCustomerId`, or `customer.email`), whose currency must equal the payment currency.
 3. `POST /books/v3/invoices` with the customer, `reference_number`, one line item, and, when a receiving account matches, your account details in `notes`.
-4. If Zoho returns a draft, marks it sent (`POST /invoices/{id}/status/sent`), because Skydo imports invoices as outstanding receivables.
+4. Looks up the reference again. If another process created an invoice for the same orderRef at the same time, the newer one is voided and the older one returned.
+5. If the invoice is a draft, marks it sent (`POST /invoices/{id}/status/sent`). This also repairs an earlier attempt that created the invoice but failed before marking it sent. (Skydo does not document whether drafts sync; marking them sent is a precaution.)
 
 Optional `provider_options` (SDK: `providerOptions`) for the Zoho bridge:
 
@@ -297,7 +310,7 @@ Optional `provider_options` (SDK: `providerOptions`) for the Zoho bridge:
 ### 5.2 Wait for the money
 
 - **Zoho bridge:** nothing to do. Skydo has no webhooks, so poll. Skydo syncs every ~10 minutes, so checking unpaid invoices every 15 minutes is enough.
-- **Ledger mode:** when Skydo emails or WhatsApps you that money for an order arrived, record it (next step).
+- **Ledger mode:** when Skydo emails or WhatsApps you that money for an order arrived, **check it in the Skydo dashboard**, then record it (next step). Never record a receipt on the strength of a forwarded email or message alone.
 
 ### 5.3 Record a receipt (ledger mode only)
 
@@ -305,7 +318,14 @@ MCP:
 
 ```json
 // payments_skydo_record_payment
-{ "order_ref": "INV_2026_041", "amount_received": 124000, "fira_number": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10" }
+{
+  "order_ref": "INV_2026_041",
+  "receipt_id": "SKY-TXN-88412",
+  "amount_received": 124000,
+  "fira_number": "FIRA-2026-000123",
+  "note": "Intermediary bank deducted USD 10",
+  "confirm": true
+}
 ```
 
 SDK:
@@ -313,10 +333,11 @@ SDK:
 ```ts
 await payments.skydoRecordPayment({
   orderRef: 'INV_2026_041',
+  receiptId: 'SKY-TXN-88412',        // Skydo transaction reference or FIRA number (required, max 100 chars)
   amountReceived: 124000,           // minor units of the invoice currency
   firaNumber: 'FIRA-2026-000123',   // optional
   note: 'Intermediary bank deducted USD 10', // optional
-  receivedAt: '2026-11-03T09:30:00Z',         // optional, default now
+  receivedAt: '2026-11-03T09:30:00Z',         // optional ISO date, default now
 });
 ```
 
@@ -332,13 +353,15 @@ Result (this tool returns the ledger entry in `raw`):
   "currency": "USD",
   "method": "international_bank_transfer",
   "failureReason": "Received USD 1240.00 of 1250.00.",
-  "raw": { "orderRef": "INV_2026_041", "amount": 125000, "currency": "USD", "status": "pending", "amountReceived": 124000, "receipts": [ { "amount": 124000, "receivedAt": "2026-11-03T09:30:00Z", "firaNumber": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10" } ], "...": "..." }
+  "raw": { "orderRef": "INV_2026_041", "amount": 125000, "currency": "USD", "status": "pending", "amountReceived": 124000, "receipts": [ { "receiptId": "SKY-TXN-88412", "amount": 124000, "receivedAt": "2026-11-03T09:30:00.000Z", "firaNumber": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10" } ], "...": "..." }
 }
 ```
 
-Receipts add up. When the total reaches the invoice amount, the status becomes `captured`; anything short stays `pending`. **Recording the same receipt twice counts it twice**: check `payments_get_status` before recording again. Recording is audited (`skydo_record_payment`) but, unlike refunds, it is not behind the live-mutation gate, so an agent should record a receipt only when a human has confirmed Skydo's notification.
-
-With the Zoho bridge configured, this call fails with `VALIDATION` ("Skydo marks invoices paid itself").
+- Receipts add up. When the total reaches the invoice amount, the status becomes `captured`; anything short stays `pending`.
+- **`receipt_id` makes recording idempotent.** Recording the same `receipt_id` with the same amount again changes nothing. The same `receipt_id` with a different amount fails with `IDEMPOTENCY_CONFLICT`.
+- **Live-mode gate.** Recording a receipt can mark an order paid, so through the MCP server in `live` mode it needs `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` on the server **and** `confirm: true` on the call, exactly like a refund. SDK calls are gated only if you create the client with `guardLiveMutations: true` (then pass `{ confirm: true }` as the second argument).
+- Every call is audited as `skydo_record_payment`, including the `receiptId`.
+- With the Zoho bridge configured, this call fails with `VALIDATION` ("Skydo marks invoices paid itself").
 
 ### 5.4 Check status and fulfil
 
@@ -346,7 +369,7 @@ MCP:
 
 ```json
 // payments_verify_payment: bind the check to your order and amount
-{ "provider": "skydo", "order_ref": "INV_2026_041", "expected_amount": 125000, "payload": {} }
+{ "provider": "skydo", "order_ref": "INV_2026_041", "expected_amount": 125000, "provider_order_id": "1234567000000098765", "payload": {} }
 ```
 
 ```json
@@ -357,16 +380,22 @@ MCP:
 SDK:
 
 ```ts
-const v = await payments.verifyPayment('skydo', { orderRef: 'INV_2026_041', expectedAmount: 125000, payload: {} });
+const v = await payments.verifyPayment('skydo', {
+  orderRef: 'INV_2026_041',
+  expectedAmount: 125000,
+  providerOrderId: created.providerOrderId,
+  payload: {},
+});
 if (v.paid) {
   // fulfil once (make this idempotent)
 }
 const s = await payments.getPaymentStatus('skydo', { orderRef: 'INV_2026_041', providerOrderId: created.providerOrderId });
 ```
 
-There is no callback to verify, so `verifyPayment` reads the authoritative record: the Zoho invoice (`verifiedVia: "status_api"`) or the ledger (`verifiedVia: "manual_record"`). `valid` is `false` when the recorded amount differs from `expected_amount`. As for every gateway, **fulfil only when `paid` is `true`**: `PaymentsClient` sets it only when the result is valid, the status is settled (`captured` here), and you passed both `orderRef` and `expectedAmount`.
-
-`getPaymentStatus` in Zoho mode uses the invoice id when you pass `providerOrderId`, otherwise it looks the invoice up by reference. The result's `raw` contains the invoice and `firaAttached` (`true` when the invoice has an attachment, which is how Skydo delivers the FIRA). The MCP server strips `raw` unless you pass `include_raw: true`.
+- There is no callback to verify, so `verifyPayment` reads the authoritative record: the Zoho invoice (`verifiedVia: "status_api"`) or the ledger (`verifiedVia: "manual_record"`). `valid` is `false` when the recorded amount differs from `expected_amount`. `reason` carries the status explanation (for example the balance of a partial payment).
+- As for every gateway, **fulfil only when `paid` is `true`**: `PaymentsClient` sets it only when the result is valid, the status is settled (`captured` here), and you passed both `orderRef` and `expectedAmount`.
+- In Zoho mode the adapter uses the invoice id when you pass `providerOrderId`, otherwise it looks the invoice up by reference. It always reads the full invoice, and **refuses an invoice whose `reference_number` is not your orderRef** (`VALIDATION`), so another order's invoice can never answer for yours.
+- The result's `raw` contains the invoice and `firaAttached` (`true` when the invoice has an attachment, which is how Skydo delivers the FIRA). The MCP server strips `raw` unless you pass `include_raw: true`.
 
 ### 5.5 List what is still owed
 
@@ -385,7 +414,13 @@ It lists ledger entries with status `created` or `pending`, oldest first. Use it
 
 ### 5.6 Generated integration code
 
-`payments_generate_integration` with `provider: "skydo"` generates a backend for this flow instead of a checkout: a service module (`requestPayment`, `refreshStatus`, `pollUnpaid` every 15 minutes, `recordReceipt`, `outstanding`), routes `POST /api/skydo/invoices`, `GET /api/skydo/invoices/:orderRef`, `POST /api/skydo/receipts` (admin) and, for Next.js, a poll route; plus an env template and `docs/SKYDO_PAYMENTS.md`. The admin routes check an `ADMIN_API_TOKEN` bearer token; that variable belongs to the generated app, not to this server. Replace it with your real admin auth.
+`payments_generate_integration` with `provider: "skydo"` generates a backend for this flow instead of a checkout:
+
+- a service module: `requestPayment`, `refreshStatus`, `pollUnpaid` (every 15 minutes with the Zoho bridge), `recordReceipt`, `outstanding`, `storedStatus`;
+- routes: `POST /api/skydo/invoices`; `GET /api/skydo/invoices/:orderRef`, which answers from your own records and never calls Zoho, to protect your Zoho API quota; and the admin routes `POST /api/skydo/invoices/:orderRef/refresh` and `POST /api/skydo/receipts` (with `receiptId`). For Next.js there is also a poll route;
+- an env template and `docs/SKYDO_PAYMENTS.md`.
+
+The admin routes check an `ADMIN_API_TOKEN` bearer token. That variable belongs to the generated app, not to this server. Replace it with your real admin auth.
 
 ### 5.7 Mock mode
 
@@ -395,14 +430,18 @@ With `PAYMENTS_MODE=mock`, `payments_create_payment` for Skydo still enforces th
 
 ## 6. Status in each state
 
-| Zoho invoice status | Our `status` | Meaning |
+| Zoho invoice | Our `status` | Meaning |
 |---|---|---|
-| `draft` | `created` | Not yet sent (the adapter marks new drafts sent) |
+| `draft` | `created` | Not yet sent (the adapter marks drafts sent) |
 | `sent`, `viewed`, `unpaid`, `overdue` | `created` | Waiting for the money |
 | `partially_paid` | `pending` | Part of the money arrived. `failureReason` shows the balance |
-| `paid` | `captured` | Skydo matched the payment and marked the invoice paid. `paid` can be `true` |
+| `paid`, payments cover the total, nothing written off | `captured` | Paid. `paid` can be `true` |
+| `paid` with a write-off (bad debt) | `failed` | Zoho shows "paid", but the amount was written off; no money arrived for it |
+| `paid`, but payments cover less than the total (closed with credit notes), or Zoho returned no `payment_made` | `unknown` | Cannot confirm the money arrived. `failureReason` explains |
 | `void` | `cancelled` | Invoice voided in Zoho |
 | anything else | `unknown` | A Zoho status this adapter does not recognise |
+
+"Paid in Zoho" means paid in Zoho, which is not always "received through Skydo": a payment you record by hand in Zoho, or one made through a Zoho online gateway, also counts. Use `firaAttached` (status `raw`) as the signal that Skydo processed it.
 
 | Ledger state | Our `status` | Meaning |
 |---|---|---|
@@ -410,22 +449,23 @@ With `PAYMENTS_MODE=mock`, `payments_create_payment` for Skydo still enforces th
 | Receipts total less than the amount | `pending` | Short payment (often bank fees abroad). `failureReason` shows received vs expected |
 | Receipts total at least the amount | `captured` | Paid. `paid` can be `true` |
 
-A ledger entry can also be `cancelled`; no tool sets that, and recording a receipt against a cancelled entry fails. To change an entry by hand, stop the server, edit the ledger file, and start it again; the server only reads the file at start-up and overwrites it on the next write.
+A ledger entry can also be `cancelled`; no tool sets that, and recording a receipt against a cancelled entry fails. To change an entry by hand, edit the ledger file while nothing is writing to it (no lock file present).
 
 ---
 
 ## 7. Limits
 
-- **Foreign currency from abroad only.** INR, or a missing `currency`, is rejected with `VALIDATION`. Use a domestic gateway (Razorpay, Cashfree, PayU, PhonePe, Paytm, CCAvenue) for INR.
-- **Minimum USD 50 per payment** (Skydo FAQ). The adapter enforces it for USD (`amount` ≥ `5000`). It does not check minimums for other currencies.
+- **Foreign currency from abroad only.** INR, or a missing or non-ISO `currency`, is rejected with `VALIDATION`. Use a domestic gateway (Razorpay, Cashfree, PayU, PhonePe, Paytm, CCAvenue) for INR.
+- **Minimum USD 50 per payment** (Skydo FAQ), or the equivalent in other currencies. The adapter enforces it exactly for USD (`amount` ≥ `5000`); for other currencies it only adds a reminder to the instructions.
 - **No cards, UPI or website checkout.** Payment is a bank transfer to your Skydo receiving account.
-- **No refunds** through this project. Refunds to a foreign client are handled with Skydo support.
+- **No refunds** through this project. Skydo's FAQ says it cannot initiate a refund directly once a payment is settled; returning money is arranged outside Skydo.
 - **No webhooks.** Poll (Zoho bridge) or record receipts (ledger mode).
-- **No recurring payments** (Skydo FAQ), no customer objects, no settlement or payout API. Payouts to your Indian bank and FIRAs are in the Skydo dashboard (Reports tab exports).
+- **No recurring payments** (InstaLinks do not support them, per Skydo's FAQ, and Skydo has no subscription product): raise one invoice per billing period. No customer objects, no settlement or payout API. Payouts to your Indian bank and FIRAs are in the Skydo dashboard (Reports tab exports).
 - **Payment links (InstaLinks) can only be created in the Skydo dashboard, and each link is single-use.** This project cannot create or track them.
 - **Fees and FX are not computed.** Amounts stay in the invoice currency; the INR settlement is not tracked. See Skydo's website for current fees.
-- **Every incoming transfer must be matched to an invoice in Skydo.** Always give clients the orderRef as the payment reference.
+- **Every incoming transfer must be matched to an invoice in Skydo.** Always give clients the orderRef as the payment reference. For GBP, keep it to 18 characters or fewer (UK transfers often cut references).
 - `orderRef` is 3-40 characters of letters, digits, `_` and `-` (the same rule as every gateway here). It is the Zoho `reference_number` and the bank-transfer reference.
+- **Zoho API limits apply** to the Zoho bridge (per Zoho's docs, 100 requests per minute per organisation, and a daily cap that depends on your Zoho plan). Each create costs a few calls and each status check one or two.
 
 ---
 
@@ -437,7 +477,7 @@ A ledger entry can also be `cancelled`; no tool sets that, and recording a recei
 |---|---|
 | `Skydo needs SKYDO_RECEIVING_ACCOUNTS ... and/or the ZOHO_* variables for the Zoho Books bridge.` | Configure one of the modes |
 | `Skydo's Zoho Books bridge is half-configured. Missing: ZOHO_...` | Set the listed variables, or remove all `ZOHO_*` to use ledger mode |
-| `ZOHO_DATA_CENTER "..." is not one of com, eu, in, com.au, jp, ca, com.cn, sa.` | Use the domain your `books.zoho.*` URL ends with (`books.zoho.in` → `in`), or set `ZOHO_ACCOUNTS_URL` |
+| `ZOHO_DATA_CENTER "..." is not one of com, eu, in, ...` | Use the domain your `books.zoho.*` URL ends with (`books.zoho.in` → `in`), or set `ZOHO_ACCOUNTS_URL` |
 | `SKYDO_RECEIVING_ACCOUNTS is neither JSON nor an existing file` / `is not valid JSON` / `must be a non-empty JSON array` | Fix the value. Inline JSON must start with `[` |
 | `SKYDO_RECEIVING_ACCOUNTS[i].currency must be an ISO code like "USD" or "*".` / `[i].details must be an object of label -> text.` | Fix entry `i`. All detail values must be strings |
 | `No Skydo receiving account for GBP and no "*" fallback in SKYDO_RECEIVING_ACCOUNTS.` | Add that currency or a `"*"` account |
@@ -449,14 +489,20 @@ Values that look like template placeholders (containing `replace-me`, eight or m
 
 | Message | Cause and fix |
 |---|---|
-| `Zoho refused the refresh token (invalid_code).` (`AUTH`) | The refresh token is wrong or revoked, or belongs to another data center. Generate a new one (Step 4) and check `ZOHO_DATA_CENTER` |
-| `Zoho refused the refresh token (invalid_client).` (`AUTH`) | Client ID/secret wrong, or the client belongs to another data center |
-| `skydo zoho_create_invoice failed (HTTP 4xx): <Zoho message>` or `Zoho Books zoho_create_invoice failed: <Zoho message>` (`PROVIDER_ERROR`, or `AUTH` for HTTP 401/403) | Zoho rejected the request. `providerCode` and `providerMessage` carry Zoho's own code and message. Common causes: wrong `ZOHO_ORGANIZATION_ID`; `ZOHO_ITEM_ID` not an active item in that organisation; the token was generated without both scopes (Zoho then answers that you are not authorised to perform the operation) |
-| `No Zoho Books customer with email ...` (`VALIDATION`) | Create the customer (Step 3), make that address the primary contact's email, or pass `providerOptions.zohoCustomerId` |
+| `Zoho refused the refresh token (invalid_code ...)` (`AUTH`) | The refresh token is wrong or revoked, or belongs to another data center. Generate a new one (step 4) and check `ZOHO_DATA_CENTER` |
+| `Zoho refused the refresh token (invalid_client ...)` (`AUTH`) | Client ID/secret wrong, or the client belongs to another data center |
+| `Zoho is rate-limiting token refreshes (...)` (`RATE_LIMITED`) | More than 10 token refreshes in 10 minutes (for example many short-lived processes). Wait a few minutes |
+| `AUTH` with hint "Check ZOHO_DATA_CENTER and that the refresh token ... belongs to ZOHO_ORGANIZATION_ID" | Zoho rejected the call even with a fresh token (HTTP 401, Zoho code 57, "You are not authorized to perform this operation"): wrong organisation, wrong data center, or the token lacks one of the two scopes |
+| `skydo zoho_create_invoice failed (HTTP 4xx): <Zoho message>` or `Zoho Books zoho_create_invoice failed: <Zoho message>` (`PROVIDER_ERROR`) | Zoho rejected the request; `providerCode` and `providerMessage` carry Zoho's own code and message. Common causes: `ZOHO_ITEM_ID` is not an active item in that organisation; the invoice currency differs from the organisation's base currency and no exchange rate is set (pass `providerOptions.exchangeRate`) |
+| `No Zoho Books customer with email ...` (`VALIDATION`) | Create the customer (step 3), make that address the primary contact's email, or pass `providerOptions.zohoCustomerId` |
+| `N active Zoho Books customers use ...` | Pass `providerOptions.zohoCustomerId` to pick one |
+| `The Zoho Books customer for ... is inactive.` | Mark the customer active in Zoho Books |
 | `Pass customer.email (or providerOptions.zohoCustomerId) to pick the Zoho Books customer.` | Add one of them |
 | `Zoho customer ... is billed in EUR, not USD.` | Use the customer's currency, or change it in Zoho Books |
 | `Zoho invoice INV-... already uses reference ... with a different amount or currency.` | Use a new orderRef, or void the old invoice in Zoho |
-| `No Zoho Books invoice with reference ...` (`NOT_FOUND`) | Wrong orderRef, the invoice was voided, or it was created in another organisation |
+| `Zoho invoice INV-... for ... was voided. Use a new orderRef for a new invoice.` | As it says |
+| `Zoho invoice INV-... has reference ..., not ...` (`VALIDATION`) | The `providerOrderId` you passed belongs to another order. Pass the id stored for this order |
+| `No Zoho Books invoice with reference ...` (`NOT_FOUND`) | Wrong orderRef, or the invoice was created in another organisation |
 
 ### The invoice does not appear in Skydo
 
@@ -465,6 +511,7 @@ Values that look like template placeholders (containing `replace-me`, eight or m
 3. **Wait for the sync.** Skydo syncs about every 10 minutes.
 4. **Wrong organisation.** The organisation connected in Skydo must be the one in `ZOHO_ORGANIZATION_ID`.
 5. **Status.** The adapter marks drafts sent. If you created the invoice by hand, make sure it is not still a draft and is not void.
+6. **API-created invoices.** If invoices you create by hand in Zoho appear in Skydo but API-created ones never do, Skydo is not importing API-created invoices for your account: ask Skydo support, and use ledger mode meanwhile. Please open an issue too.
 
 ### The client paid, but the status has not changed
 
@@ -475,10 +522,14 @@ Values that look like template placeholders (containing `replace-me`, eight or m
 
 | Message | Fix |
 |---|---|
-| `Skydo receives foreign currency from abroad: pass the client's currency ...` | Pass `currency`; INR is not supported |
+| `Skydo receives foreign currency from abroad: pass the client's currency ...` | Pass an ISO `currency`; INR is not supported |
 | `Skydo's minimum payment is USD 50.00 ...` | Amount is in cents: at least `5000` |
 | `Skydo ledger has no order ...` (`NOT_FOUND`) | The order was created with another `SKYDO_LEDGER_FILE`, in Zoho mode, or in mock mode |
 | `orderRef ... is already tracked with a different amount or currency.` | Use a new orderRef |
+| `receiptId is required ...` | Pass `receipt_id` (MCP) / `receiptId` (SDK) |
+| `Receipt ... was already recorded with amount ...` (`IDEMPOTENCY_CONFLICT`) | That receipt is already in the ledger with another amount. Check it; use a different `receipt_id` only for a genuinely different transfer |
+| `Recording a Skydo receipt on skydo in LIVE mode is blocked.` (`LIVE_MUTATION_BLOCKED`) | MCP in live mode: set `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and pass `confirm: true` after a human has checked the receipt |
+| `Skydo ledger ... is locked by another process.` (`PROVIDER_UNAVAILABLE`) | Another process held the lock for over 5 seconds. Retry |
 | `With the Zoho Books bridge, Skydo marks invoices paid itself; nothing to record.` | Expected in Zoho mode |
 | `Mock mode simulates Skydo receipts with payments_mock_complete_payment.` | Expected in mock mode |
 
@@ -490,10 +541,10 @@ Values that look like template placeholders (containing `replace-me`, eight or m
 No. It calls Zoho Books (Zoho bridge) or nothing at all (ledger mode).
 
 **Why not automate the Skydo dashboard?**
-Skydo's Terms forbid scraping and automated access (§25.8.12). Doing it would also break whenever the dashboard changes.
+Skydo's Terms of Use prohibit scrapers, bots and other automated access. It would also break whenever the dashboard changes.
 
 **Which mode should I use?**
-The Zoho bridge if you already use Zoho Books or are willing to: status updates are automatic and the FIRA lands on the invoice. Ledger mode if you don't use Zoho; it needs a person to record each receipt.
+The Zoho bridge if you already use Zoho Books or are willing to: once Skydo is connected, status updates need no one, and the FIRA lands on the invoice. Ledger mode if you don't use Zoho; it needs a person to confirm and record each receipt.
 
 **Can I accept cards or UPI with Skydo?**
 No. For card payments from international customers, use a gateway that offers them (for example Razorpay with international payments enabled, PayU, CCAvenue, or Stripe, which is invite-only in India). `payments_recommend_gateway` with `international` or `exporter_collections` ranks the options.
@@ -505,13 +556,16 @@ Use `PAYMENTS_MODE=mock`. `sandbox` is not a sandbox for Skydo: with `ZOHO_*` se
 Zoho bridge: attached to the Zoho invoice by Skydo (`firaAttached` in the status `raw`). Ledger mode: in the Skydo dashboard and your inbox; store its number with `fira_number` when you record the receipt.
 
 **Is creating a payment twice safe?**
-Yes, with the same orderRef, amount and currency. The Zoho bridge finds the existing invoice by reference, and ledger mode returns the existing entry. A different amount or currency for the same orderRef fails.
+Yes, with the same orderRef, amount and currency. The Zoho bridge finds the existing invoice by reference (and voids a duplicate created by a concurrent process), and ledger mode returns the existing entry. A different amount or currency for the same orderRef fails.
 
 **Is recording a receipt twice safe?**
-No. Each call adds a receipt.
+Yes, if you use the same `receipt_id`: the second call changes nothing.
 
-**Can the ledger be shared between servers?**
-No. It is a local file for one process. For several instances, use the Zoho bridge, or keep your own database and use the SDK.
+**Can my app and the MCP server share the ledger?**
+Yes, on the same machine or filesystem: every change is made under a file lock and re-reads the file. Avoid network filesystems whose lock-file semantics you have not checked. For several machines, use the Zoho bridge or keep your own database.
+
+**Can an AI agent mark an order paid?**
+Only in ledger mode, with `payments_skydo_record_payment`, and in live mode only when the server allows live mutations and the call passes `confirm: true`. The tool description tells agents to act only on a receipt a human has checked. Treat forwarded "payment received" emails as untrusted.
 
 **What happens when Skydo ships an API?**
 The adapter will switch to it: create, status and webhooks through Skydo directly, with the Zoho bridge and ledger kept for existing users. See [roadmap.md](roadmap.md).

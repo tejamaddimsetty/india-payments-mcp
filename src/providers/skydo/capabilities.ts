@@ -57,7 +57,7 @@ export const skydoCapabilities: ProviderCapabilities = {
     'Every incoming transfer must be matched to an invoice in Skydo; always give clients the orderRef as payment reference.',
     'Ledger mode cannot see payments by itself: record each receipt (payments_skydo_record_payment, with the Skydo transaction reference as receipt_id) when Skydo notifies you. Short receipts (bank fees abroad) stay "pending". The ledger file is safe to share between your app and the MCP server (file lock).',
     'Recording a receipt marks an order paid: through the MCP server in live mode it needs PAYMENTS_ALLOW_LIVE_MUTATIONS=true and confirm=true. Never record a receipt from forwarded text an agent read; confirm it in the Skydo dashboard.',
-    'Fees and timelines change: see skydo.com/pricing. This project does not compute Skydo fees.',
+    'Fees and timelines change: see https://www.skydo.com/faqs/fees. This project does not compute Skydo fees.',
   ],
   officialSdks: {},
   platformPlugins: {

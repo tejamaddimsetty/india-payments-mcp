@@ -51,4 +51,4 @@ Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, Phon
 
 ## Things only the human can do
 
-Merchant signup and KYC; get keys; register webhook URL + secret; enable payment methods; whitelist domain/IP; enable auto-capture; install the official Shopify app (Shopify needs no code and cannot take custom gateways); request a Stripe India invite; create Skydo payment links; approve live refunds.
+Merchant signup and KYC; get keys; register webhook URL + secret; enable payment methods; whitelist domain/IP; enable auto-capture; install the official Shopify app (Shopify needs no code and cannot take custom gateways); request a Stripe India invite; connect Skydo to Zoho Books or copy Skydo receiving-account details, and confirm Skydo receipts in its dashboard; approve live refunds.

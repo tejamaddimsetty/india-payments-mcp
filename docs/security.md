@@ -31,11 +31,11 @@ For reporting vulnerabilities, see [SECURITY.md](../SECURITY.md).
 | API key vs webhook secret | Razorpay, Stripe and PhonePe use different secrets for API calls and webhooks. Give the webhook-receiving service only the webhook secret if it doesn't call APIs |
 | Gateways | `PAYMENTS_PROVIDERS=razorpay` limits the attack surface to gateways you use. Disabled gateways fail with `VALIDATION` |
 | Payments vs payouts | Payouts (RazorpayX, Cashfree Payouts) use **separate keys and accounts** and aren't implemented. Keep it that way for agent-facing deployments until you need them |
-| Read vs write | Not enforced per tool today. Live mutations are gated (§3). For a read-only agent deployment, run with `PAYMENTS_MODE=live` and without `PAYMENTS_ALLOW_LIVE_MUTATIONS`. Refunds and cancellations will then always be blocked. Order creation isn't blocked (it moves no money by itself) |
+| Read vs write | Not enforced per tool today. Live mutations are gated (§3). For a read-only agent deployment, run with `PAYMENTS_MODE=live` and without `PAYMENTS_ALLOW_LIVE_MUTATIONS`. Refunds, cancellations and Skydo receipt recording will then always be blocked. Order creation isn't blocked (it moves no money by itself) |
 
 ## 3. Live-mode rails
 
-`PaymentsClient.assertLiveMutationAllowed` runs for **`refund`** and **`cancelSubscription`** when `mode === 'live'` and the client was created with `guardLiveMutations: true`. The MCP server (stdio and HTTP) always sets it, because an AI agent is the caller:
+`PaymentsClient.assertLiveMutationAllowed` runs for **`refund`**, **`cancelSubscription`** and **`skydoRecordPayment`** (recording a Skydo receipt can mark an order paid) when `mode === 'live'` and the client was created with `guardLiveMutations: true`. The MCP server (stdio and HTTP) always sets it, because an AI agent is the caller:
 
 ```
 allowed = config.allowLiveMutations (PAYMENTS_ALLOW_LIVE_MUTATIONS=1|true|yes)
@@ -57,7 +57,7 @@ Set `PAYMENTS_AUDIT_LOG=/path/audit.jsonl`. `FileAuditSink` appends one redacted
 {"ts":"2026-10-28T10:02:11.120Z","action":"refund","provider":"razorpay","orderRef":"ORD_1001","refundRef":"RF_ORD_1001_1","amount":10000,"mode":"live","actor":"mcp:stdio","outcome":"blocked","errorCode":"LIVE_MUTATION_BLOCKED"}
 ```
 
-- Audited actions: `create_payment`, `refund`, `create_subscription`, `cancel_subscription` (success / error / blocked), and `webhook` (rejections only).
+- Audited actions: `create_payment`, `refund`, `create_subscription`, `cancel_subscription`, `skydo_record_payment` (success / error / blocked), and `webhook` (rejections only).
 - `actor` is `mcp:stdio`, `mcp:http`, `cli`, `sdk`, or whatever you pass as `new PaymentsClient({ actor })`. For HTTP deployments with an authenticating proxy, create one client per identity, or wrap the sink, to record the real user.
 - Audit write failures are logged (`audit.write_failed`) and **don't** fail the payment operation. If you need fail-closed auditing, implement `AuditSink` and throw.
 - Ship the file to append-only storage (S3 Object Lock, a SIEM). A local file can be edited by anyone with the same uid.

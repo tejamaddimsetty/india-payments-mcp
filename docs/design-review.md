@@ -90,6 +90,8 @@ The reviewer agent's critique of the 0.1.0 design. Each challenge records what w
 
 **Revision.** Skydo has a full capability map with every feature `unsupported` and guidance in the notes. Its adapter throws `UNSUPPORTED` as a second line of defence. The recommender surfaces it only for `exporter_collections` and suggests pairing it with an API gateway. (`src/providers/skydo/*`)
 
+**Later revision (0.2.0).** Skydo still has no API, but its own Zoho Books integration and standing receiving accounts can be automated without touching Skydo. The adapter now creates Zoho invoices that Skydo imports (or hands out account details with a local ledger), so create, verify and status are `partial`; everything else stays `unsupported`, and the adapter still never contacts Skydo. See [skydo.md](skydo.md).
+
 ### 15. Key/mode mismatches
 
 **Challenge.** Running `PAYMENTS_MODE=sandbox` with live keys moves real money while everyone believes it's a test.

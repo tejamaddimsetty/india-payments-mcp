@@ -21,7 +21,7 @@ PAYMENTS_MODE=mock npm run dev
 
 What `MockGateway` does (`src/mock/mock-gateway.ts`):
 
-- **Keeps each gateway's real capability map.** `payments_create_customer` on PhonePe fails with `UNSUPPORTED` in mock mode exactly as it would in production, and every Skydo call fails.
+- **Keeps each gateway's real capability map.** `payments_create_customer` on PhonePe fails with `UNSUPPORTED` in mock mode exactly as it would in production, and so does a Skydo refund. Skydo's currency rules (no INR, USD 50 minimum) are enforced in mock mode too; `payments_skydo_record_payment` and `payments_skydo_outstanding` are not available in mock mode, so simulate Skydo payments with `payments_mock_complete_payment`.
 - Keeps state in one `MockLedger` per `PaymentsClient`, shared across MCP tool calls. State is in memory and lost when the process exits.
 - `createPayment` returns a `manual` checkout. The customer is simulated with `payments_mock_complete_payment` (`outcome: success | failure`, `method` default `upi`), which returns a callback payload **HMAC-signed** with a fixed mock secret. `verifyPayment` rejects tampered fields, orderRef mismatches and amount mismatches.
 - Refunds enforce the refundable balance, move status to `partially_refunded` / `refunded`, and de-duplicate by `refundRef`.
@@ -49,7 +49,7 @@ Where to get test credentials, and what to test with. **Test instruments are mar
 | Paytm | paytmpayments.com dashboard → Developer Settings → API Keys (test MID + 16-char key). Website `WEBSTAGING` | Paytm docs provide staging test wallet/card credentials (UNVERIFIED here) | Hosts were rebranded to `*.paytmpayments.com`. `txnToken` lasts 15 min. Business errors return HTTP 200 |
 | PhonePe | Sandbox `client_id` / `client_secret` / `client_version` come from the **PhonePe integration team**. Production comes from the Business Dashboard | PhonePe documents a sandbox PayPage/simulator flow (UNVERIFIED here) | Ask the integration team to configure the sandbox webhook URL and credentials. Minimum 100 paise |
 | Stripe | Dashboard → Developers → API keys (`sk_test_…`, `pk_test_…`). Requires an existing (invited) account for India | Stripe's testing page lists `4242 4242 4242 4242` and India-specific cards (Stripe docs; not re-verified here) | `stripe listen --forward-to localhost:3000/webhooks/stripe` prints a test `whsec_` |
-| Skydo | n/a: no API | n/a | n/a |
+| Skydo | No Skydo sandbox. Zoho bridge: use a Zoho Books organisation that is **not** connected to Skydo (with `ZOHO_*` set, `sandbox` mode creates real invoices). Ledger mode: any `SKYDO_RECEIVING_ACCOUNTS` and a scratch `SKYDO_LEDGER_FILE` | n/a | See [skydo.md](skydo.md). Confirm once, with one real invoice, that Skydo imports API-created Zoho invoices |
 
 After configuring, run:
 

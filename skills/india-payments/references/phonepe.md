@@ -23,7 +23,7 @@ Integer paise, **min 100** (payments and refunds). VERIFIED
 
 | Purpose | Call | Status |
 |---|---|---|
-| Create payment | `POST /checkout/v2/pay` `{merchantOrderId (≤63, letters/digits/_/-), amount, expireAfter? (300–3600 s), paymentFlow:{type:"PG_CHECKOUT", merchantUrls:{redirectUrl}}, metaInfo?:{udf1..udf15}, prefillUserLoginDetails?:{phoneNumber}, disablePaymentRetry?}` → `{orderId, state:"PENDING", expireAt, redirectUrl}`. `metaInfo`: udf1..udf10 max 256 chars; udf11..udf15 max 50 chars of letters, digits and `_-+@.` (validated by this project) | VERIFIED |
+| Create payment | `POST /checkout/v2/pay` `{merchantOrderId (≤63, letters/digits/_/-), amount, expireAfter? (300–3600 s), paymentFlow:{type:"PG_CHECKOUT", merchantUrls:{redirectUrl}}, metaInfo?:{udf1..udf15}, prefillUserLoginDetails?:{phoneNumber}, disablePaymentRetry?}` → `{orderId, state:"PENDING", expireAt, redirectUrl}`. `metaInfo`: udf1..udf10 max 256 chars; udf11..udf15 max 50 chars of letters, digits and `_-+@.` (validated by this project; free-form metadata fills udf1..udf10, udf11..udf15 only by explicit key) | VERIFIED |
 | Order status | `GET /checkout/v2/order/{merchantOrderId}/status?details=false&errorContext=true` → `state` ∈ `PENDING\|COMPLETED\|FAILED`, `paymentDetails[]` | VERIFIED |
 | Refund | `POST /payments/v2/refund` `{merchantRefundId (≤63), originalMerchantOrderId, amount}` → `state: PENDING`. That `merchantRefundId` de-duplicates retries is assumed, not documented | VERIFIED (call) / UNVERIFIED (de-dupe) |
 | Refund status | `GET /payments/v2/refund/{merchantRefundId}/status` → `PENDING\|COMPLETED\|FAILED` (custom-checkout docs also list `CONFIRMED`) | VERIFIED |

@@ -37,7 +37,7 @@
 | https://www.skydo.com/docs | **404** |
 | https://www.skydo.com/integrations | **404** |
 | https://www.skydo.com/partners | **404** |
-| https://www.skydo.com/pricing | **404** |
+| https://www.www.skydo.com/faqs/fees | **404** |
 | https://www.skydo.com/changelog | **404** |
 | https://www.skydo.com/careers | **404** |
 | https://www.skydo.com/zoho-books-integration | **404** |

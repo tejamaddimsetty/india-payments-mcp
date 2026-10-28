@@ -83,13 +83,14 @@ Status API requirements: Razorpay needs `providerOrderId`, and Stripe needs the 
 
 ### Playbook: timeout on create
 
-Symptom: `createPayment` returns `TIMEOUT` or `NETWORK`, and the gateway may or may not have created the order.
+Symptom: `createPayment` returns `OUTCOME_UNKNOWN` (or `TIMEOUT` / `NETWORK` where the create is retry-safe), and the gateway may or may not have created the order.
 
 1. **Don't** call create again with a new orderRef. You may end up with two live orders for one cart.
 2. For gateways keyed by your `orderRef` (Cashfree, PhonePe, Paytm, PayU, CCAvenue), call `getPaymentStatus({ orderRef })`. If the order exists, reuse it. If `NOT_FOUND`, it's safe to create with the **same** orderRef.
 3. For Stripe, retry with the same orderRef / `idempotencyKey`. The `Idempotency-Key` makes the gateway return the original Session.
-4. For Razorpay (not idempotent, and status needs `order_id`), retrying with the same orderRef creates a second Razorpay order with the same `receipt`. That's acceptable, because an unpaid order expires harmlessly. Make sure your app keeps only the latest `providerOrderId` and verifies callbacks with `orderRef`, which matches on `receipt`.
-5. A client-layer replay with the same key only returns a stored result if the first call **succeeded**. Failures aren't cached, so step 2 applies.
+4. For Razorpay, retry with the **same** orderRef. Razorpay rejects a second order with the same `receipt` as a duplicate, and the adapter then fetches the existing order by receipt and returns it if amount and currency match (otherwise the original error is thrown). Store the returned `providerOrderId`.
+5. For Skydo with the Zoho bridge, retry with the same orderRef: the adapter finds the existing invoice by reference (and voids a duplicate created concurrently).
+6. A client-layer replay with the same key only returns a stored result if the first call **succeeded**. Failures aren't cached, so step 2 applies.
 
 ### Playbook: UPI payment pending
 

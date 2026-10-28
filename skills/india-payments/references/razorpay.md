@@ -29,7 +29,7 @@ Integer paise (smallest subunit): Rs 299 = `29900`. Min 100 paise. Zero-decimal 
 | Settlements | `GET /v1/settlements`, `GET /v1/settlements/:id`, `GET /v1/settlements/recon/combined?year=YYYY&month=MM` | VERIFIED |
 | Payouts (RazorpayX) | `POST /v1/payouts`, header `X-Payout-Idempotency` required, IP allowlist required, separate product activation | VERIFIED |
 
-`receipt` max 40 chars (put your attempt ref here). `notes` max 15 pairs.
+`receipt` max 40 chars (put your attempt ref here). `notes` max 15 pairs. A second order with the same receipt is rejected as a duplicate; this project then returns the existing order if amount and currency match.
 
 ## Checkout flow (Standard Checkout)
 
@@ -85,7 +85,7 @@ Common webhook events: `payment.authorized`, `payment.captured`, `payment.failed
 - Webhook secret != key secret. Most "signature invalid" bugs are this, or verifying `JSON.stringify(req.body)` instead of raw bytes.
 - Same host for test and live: a live key in a dev env charges real cards.
 - Instant refunds are `speed: "optimum"` (the unified API calls it `instant`); they can fall back to normal; read `speed_processed`.
-- Subscriptions need `total_count`. The first payment is the mandate authorisation via Checkout with `subscription_id`.
+- Subscriptions need `total_count` or `end_at` (this project: `totalCount`, or `providerOptions.end_at`). The first payment is the mandate authorisation via Checkout with `subscription_id`.
 - Daily plans need `interval >= 7` (enforced before the call).
 - `customer_id` is not a create-subscription parameter; Razorpay fills it after authorisation. This project keeps your customer id in `notes.customer_id`.
 - Payment `method` values on the payment entity: `upi`, `card`, `netbanking`, `wallet`, `emi`, `paylater`. `cardless_emi` is not in the documented enum.

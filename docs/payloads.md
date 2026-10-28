@@ -116,7 +116,7 @@ For Skydo, every variable is optional (`ready` is always `true`); a missing or b
 ```json
 {
   "ranking": [
-    { "provider": "skydo", "name": "Skydo", "score": 16, "matches": ["exporter_collections", "international"], "blockers": [], "summary": "...", "constraints": ["Skydo has no public API, SDK or webhooks, and its Terms (§25.8.12) forbid scraping/automating the dashboard. This adapter never contacts Skydo.", "..."] },
+    { "provider": "skydo", "name": "Skydo", "score": 16, "matches": ["exporter_collections", "international"], "blockers": [], "summary": "...", "constraints": ["Skydo has no public API, SDK or webhooks, and its Terms of Use prohibit scrapers, bots and other automated access to the platform. This adapter never contacts Skydo.", "..."] },
     { "provider": "stripe", "name": "Stripe (India)", "score": 5, "matches": ["international"], "blockers": [], "summary": "...", "constraints": ["Stripe services are invite-only in India ...", "..."] }
   ],
   "note": "Heuristic ranking from the capability map. Pricing, settlement time and KYC approval vary by business; confirm with the gateway before committing."
@@ -596,7 +596,7 @@ Skydo has no API; see [skydo.md](skydo.md) for setup. Amounts are minor units of
   "currency": "USD",
   "checkout": {
     "type": "manual",
-    "instructions": "Please pay USD 1250.00 by bank transfer to Acme Exports Pvt Ltd.\nPayment reference (include it in the transfer note): INV_2026_041\n\nUS account (ACH / Fedwire)\nAccount holder: Acme Exports Pvt Ltd\nAccount number: ...\nACH routing number: ...\n\nPayments are received through Skydo (skydo.com) and settled to India with a FIRA.\n\nWhen Skydo notifies you that the money arrived, record it (MCP: payments_skydo_record_payment; SDK: client.skydoRecordPayment)."
+    "instructions": "Please pay USD 1250.00 by bank transfer to Acme Exports Pvt Ltd.\nPayment reference (include it in the transfer note): INV_2026_041\n\nUS account (ACH / Fedwire)\nAccount holder: Acme Exports Pvt Ltd\nAccount number: ...\nACH routing number: ...\n\nPayments are received through Skydo (skydo.com) and settled to India with a FIRA.\n\nWhen Skydo notifies you that the money arrived, record it (MCP: payments_skydo_record_payment; SDK: client.skydoRecordPayment) with the Skydo transaction reference as receiptId."
   }
 }
 ```
@@ -617,15 +617,17 @@ Same arguments. Optional `provider_options`: `zohoCustomerId`, `sendEmail: true`
   "checkout": {
     "type": "manual",
     "url": "https://books.zoho.in/...",
-    "instructions": "Zoho Books invoice INV-000041 is ready for USD 1250.00.\nSkydo imports it within about 10 minutes (Skydo dashboard > Connect Skydo to Zoho must be done once), then marks it paid in Zoho and attaches the FIRA when the money arrives.\nShare the invoice link with your client: https://books.zoho.in/..."
+    "instructions": "Zoho Books invoice INV-000041 is ready for USD 1250.00.\nSkydo imports Zoho invoices about every 10 minutes (Skydo profile > Connect Skydo to Zoho, done once), marks the invoice paid when the money arrives, and attaches the FIRA.\nInvoice link for your client: https://books.zoho.in/..."
   }
 }
 ```
 
 ### `payments_skydo_record_payment` (ledger mode)
 
+Only after a human has checked the receipt in the Skydo dashboard. In `live` mode the server needs `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and the call needs `confirm: true`.
+
 ```json
-{ "order_ref": "INV_2026_041", "amount_received": 124000, "fira_number": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10" }
+{ "order_ref": "INV_2026_041", "receipt_id": "SKY-TXN-88412", "amount_received": 124000, "fira_number": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10", "confirm": true }
 ```
 
 ```json
@@ -642,12 +644,12 @@ Same arguments. Optional `provider_options`: `zohoCustomerId`, `sendEmail: true`
     "orderRef": "INV_2026_041", "amount": 125000, "currency": "USD", "status": "pending", "amountReceived": 124000,
     "createdAt": "2026-10-29T10:00:00.000Z", "updatedAt": "2026-11-03T09:30:00.000Z",
     "customer": { "name": "Globex Corp", "email": "ap@globex.example" }, "description": "Design retainer, March 2026",
-    "receipts": [ { "amount": 124000, "receivedAt": "2026-11-03T09:30:00.000Z", "firaNumber": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10" } ]
+    "receipts": [ { "receiptId": "SKY-TXN-88412", "amount": 124000, "receivedAt": "2026-11-03T09:30:00.000Z", "firaNumber": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10" } ]
   }
 }
 ```
 
-Recording a further `1000` moves it to `captured`. Each call adds a receipt, so do not record the same receipt twice.
+Recording a further `1000` under a new `receipt_id` moves it to `captured`. Re-sending the same `receipt_id` and amount changes nothing; the same `receipt_id` with a different amount fails with `IDEMPOTENCY_CONFLICT`.
 
 ### `payments_skydo_outstanding`
 
@@ -674,7 +676,7 @@ Recording a further `1000` moves it to `captured`. Each call adds a receipt, so 
 { "valid": true, "paid": true, "status": "captured", "orderRef": "INV_2026_041", "providerOrderId": "skydo:INV_2026_041", "amount": 125000, "verifiedVia": "manual_record" }
 ```
 
-With the Zoho bridge, `verifiedVia` is `"status_api"` and `providerOrderId` is the Zoho invoice id. Before the money arrives the same call returns `valid: true, paid: false, status: "created"` (or `"pending"` after a partial payment).
+With the Zoho bridge, `verifiedVia` is `"status_api"` and `providerOrderId` is the Zoho invoice id; pass the stored id as `provider_order_id` (an invoice whose reference is not `order_ref` is refused). Before the money arrives the same call returns `valid: true, paid: false, status: "created"` (or `"pending"` with the balance in `reason` after a partial payment). A Zoho invoice that shows "paid" because it was written off returns `status: "failed"`.
 
 ### Skydo errors
 
@@ -688,6 +690,10 @@ With the Zoho bridge, `verifiedVia` is `"status_api"` and `providerOrderId` is t
 
 ```json
 { "error": "VALIDATION", "message": "With the Zoho Books bridge, Skydo marks invoices paid itself; nothing to record.", "retryable": false, "provider": "skydo" }
+```
+
+```json
+{ "error": "LIVE_MUTATION_BLOCKED", "message": "Recording a Skydo receipt on skydo in LIVE mode is blocked.", "retryable": false, "provider": "skydo", "hint": "Set PAYMENTS_ALLOW_LIVE_MUTATIONS=true on the server AND pass confirm=true on the call after a human has approved it." }
 ```
 
 ---
@@ -715,7 +721,7 @@ All errors share this envelope. Keys whose value is `undefined` are omitted.
 ```json
 {
   "error": "UNSUPPORTED",
-  "message": "skydo does not support refund. Skydo has no developer API or webhooks (checked 2026-10-29; an API is on Skydo's roadmap since Dec 2025). Refunds to a foreign client are handled with Skydo support.",
+  "message": "skydo does not support refund. Skydo has no developer API or webhooks (checked 2026-10-29; an API is on Skydo's roadmap since Dec 2025). Skydo's FAQ says it cannot initiate a refund directly once a payment is settled; returning money is arranged outside Skydo.",
   "retryable": false,
   "provider": "skydo",
   "hint": "Call payments_get_capabilities to see what this gateway supports, or choose another gateway."

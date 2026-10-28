@@ -21,7 +21,7 @@ Status labels: VERIFIED / PARTIAL / UNVERIFIED (test in sandbox).
 | Create order | `POST /pg/orders` `{order_id (3–45, [A-Za-z0-9_-]), order_amount, order_currency, customer_details:{customer_id, customer_phone, customer_email?, customer_name?}, order_meta?:{return_url, notify_url, payment_methods}, order_expiry_time?, order_note?, order_tags?}` → `{cf_order_id, order_id, order_status, payment_session_id}` | VERIFIED |
 | Order | `GET /pg/orders/{order_id}` | UNVERIFIED (standard) |
 | Order payments | `GET /pg/orders/{order_id}/payments` | UNVERIFIED (standard) |
-| Refund | `POST /pg/orders/{order_id}/refunds` `{refund_amount, refund_id (3–40 **alphanumeric only**: `_` and `-` are rejected), refund_speed?: STANDARD\|INSTANT, refund_note?}`, header `x-idempotency-key` (UUID). Only within **6 months** of payment | VERIFIED |
+| Refund | `POST /pg/orders/{order_id}/refunds` `{refund_amount, refund_id (3–40 chars of letters, digits, `_` and `-`, as in Cashfree's examples), refund_speed?: STANDARD\|INSTANT, refund_note?}`, header `x-idempotency-key` (UUID). Only within **6 months** of payment | VERIFIED |
 | Refund status | `GET /pg/orders/{order_id}/refunds/{refund_id}` | UNVERIFIED (standard) |
 | Subscriptions | `POST /pg/plans`, `POST /pg/subscriptions` (+ mandate APIs). Body differs across versions | PARTIAL |
 | Settlements | "Get All Settlements" and "Get Settlements by Order ID" (path assumed `GET /pg/orders/{order_id}/settlements`) | UNVERIFIED path |
@@ -74,7 +74,7 @@ Webhook events normalised by this project: `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_F
 - Sending paise (`49900`) charges Rs 49,900. The most expensive bug possible with this gateway.
 - No signed return: always re-fetch.
 - Domain whitelist for JS checkout, separate for sandbox and production.
-- Refund window 6 months. `refund_id` is alphanumeric only: a refundRef with `_` or `-` is rejected.
+- Refund window 6 months. `refund_id` (our refundRef) is 3-40 chars of letters, digits, `_` and `-`, validated before the call.
 - Key-prefix checks (`TEST...`, `_test_`, `_prod_`) used by this project are a heuristic; Cashfree does not document key prefixes.
 - Pin `x-api-version`; don't copy samples written for another version.
 

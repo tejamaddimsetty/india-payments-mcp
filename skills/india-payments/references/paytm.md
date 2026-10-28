@@ -16,7 +16,7 @@ Do not hard-code the legacy hosts. Test both staging hosts if one fails.
 ## Credentials
 
 `MID`, merchant key (exactly **16 bytes**, used as the AES key), `websiteName` (`WEBSTAGING` in staging, `DEFAULT` in prod, or what the dashboard shows). VERIFIED
-Env (this project): `PAYTM_MID`, `PAYTM_MERCHANT_KEY`, `PAYTM_WEBSITE` (optional; defaults WEBSTAGING / DEFAULT).
+Env (this project): `PAYTM_MID`, `PAYTM_MERCHANT_KEY`, `PAYTM_WEBSITE` (optional; defaults WEBSTAGING / DEFAULT), `PAYTM_VERIFY_RESPONSE_SIGNATURE` (optional, default `true`; `false` skips the `head.signature` check on API responses only, never on webhooks: use it only if valid responses are rejected).
 
 ## Amounts
 
@@ -25,13 +25,13 @@ Rupee **string**, max 2 decimals, in `txnAmount.value` (`"499.00"`). VERIFIED
 ## Checkout flow (JS Checkout)
 
 1. Server: `POST {host}/theia/api/v1/initiateTransaction?mid={MID}&orderId={ORDER}` with
-   `{head:{signature, channelId?:"WEB"|"WAP"}, body:{requestType:"Payment", mid, websiteName, orderId (≤50), callbackUrl?, txnAmount:{value:"499.00", currency:"INR"}, userInfo:{custId, mobile?}}}`. `custId` allows only letters, digits and `@ ! = _ $ .` (this project replaces other characters with `_`).
+   `{head:{signature, channelId?:"WEB"|"WAP"}, body:{requestType:"Payment", mid, websiteName, orderId (≤50; letters, digits and `@ - _ .` only), callbackUrl?, txnAmount:{value:"499.00", currency:"INR"}, userInfo:{custId, mobile?}}}`. `custId` allows only letters, digits and `@ ! = _ $ .` (this project replaces other characters with `_`).
    `head.signature` = checksum of `JSON.stringify(body)`. Response: `body.resultInfo.resultStatus` `S|F|U` and `body.txnToken` (**valid 15 minutes**). Verify the response `head.signature`. VERIFIED https://paytmpayments.com/docs/api/initiate-transaction-api
 2. Client: `<script src="{host}/merchantpgpui/checkoutjs/merchants/{MID}.js">`, then
    `window.Paytm.CheckoutJS.init({root:"", flow:"DEFAULT", data:{orderId, token, tokenType:"TXN_TOKEN", amount}, handler:{notifyMerchant}}).then(() => window.Paytm.CheckoutJS.invoke())`. VERIFIED https://paytmpayments.com/docs/jscheckout-invoke-payment
 3. Paytm POSTs **form key-value pairs** to `callbackUrl`: `ORDERID, MID, TXNID, TXNAMOUNT, STATUS (TXN_SUCCESS|TXN_FAILURE|PENDING), RESPCODE, RESPMSG, BANKTXNID, CHECKSUMHASH, …`. Verify CHECKSUMHASH, check ORDERID/TXNAMOUNT, then confirm with the status API. VERIFIED https://paytmpayments.com/docs/payment-status
 4. The dashboard webhook URL receives the same form payload for payments. Same verification.
-5. Refund notifications (Accept Refund / Success Refund) are JSON `{head:{signature}, body:{orderId, txnId, refId, refundId, refundAmount, totalRefundAmount, status:"SUCCESS"|"FAILED"}}`, signature over the raw `body` JSON. The documented FAILED refund notification has no signature, so this project rejects it: poll refund status for failures. VERIFIED (shape); signed-string convention PARTIAL
+5. Refund notifications (Accept Refund / Success Refund) are JSON `{head:{signature}, body:{orderId, txnId, refId, refundId, refundAmount, totalRefundAmount, status:"SUCCESS"|"FAILED"}}`, signature over the `body` JSON. This project always verifies them. Success Refund (credit to the customer initiated) → `refund.processed`; Accept Refund SUCCESS → type `unknown` (accepted, not yet initiated); Accept Refund FAILED (signed) → `refund.failed`. The unsigned Success Refund FAILED sample is rejected: poll refund status for those failures. VERIFIED (shape); signed-string convention PARTIAL
 
 ## Checksum algorithm
 

@@ -75,7 +75,7 @@ sequenceDiagram
     A->>M: payments_refund {refund_ref, confirm?}
     M->>C: refund(..., {confirm})
     C->>C: requireFeature('refund')
-    C->>C: live + MCP caller? needs PAYMENTS_ALLOW_LIVE_MUTATIONS && confirm, else LIVE_MUTATION_BLOCKED
+    C->>C: live + MCP caller? needs PAYMENTS_ALLOW_LIVE_MUTATIONS && confirm, else LIVE_MUTATION_BLOCKED (also for cancellations and Skydo receipts)
     C->>I: idempotency keyed by refund_ref
     C->>G: refund()
     C->>L: {action: refund, outcome: success | error | blocked}
@@ -196,10 +196,10 @@ Skydo has no API; see [skydo.md](skydo.md). These two tools work in `sandbox` an
 
 | Tool | Args | Returns | Annotations |
 |---|---|---|---|
-| `payments_skydo_record_payment` | `order_ref`, `amount_received` (positive integer, minor units of the invoice currency), `received_at?` (ISO date/time, default now), `fira_number?` (≤100), `note?` (≤500) | `PaymentStatusResult` for the ledger entry: `status` is `captured` once receipts reach the amount, else `pending`; `failureReason` shows received vs expected; `raw` is the ledger entry. Ledger mode only: `VALIDATION` with the Zoho bridge. Each call adds a receipt (not idempotent). Audited as `skydo_record_payment` | not readOnly, not idempotent |
+| `payments_skydo_record_payment` | `order_ref`, `receipt_id` (1-100 chars: Skydo transaction reference or FIRA number), `amount_received` (positive integer, minor units of the invoice currency), `received_at?` (ISO date/time, default now), `fira_number?` (≤100), `note?` (≤500), `confirm?` (required `true` in live mode) | `PaymentStatusResult` for the ledger entry: `status` is `captured` once receipts reach the amount, else `pending`; `failureReason` shows received vs expected; `raw` is the ledger entry. Ledger mode only: `VALIDATION` with the Zoho bridge. Idempotent per `receipt_id` (same id + amount = no-op; different amount = `IDEMPOTENCY_CONFLICT`). Live mode: same double gate as refunds. Audited as `skydo_record_payment` | **destructive**, idempotent |
 | `payments_skydo_outstanding` | none | `{ mode: "ledger"\|"zoho", outstanding: LedgerEntry[], note? }`: ledger entries with status `created` or `pending`, oldest first. In Zoho mode `outstanding` is empty and `note` points to Zoho Books | readOnly |
 
-SDK equivalents: `PaymentsClient.skydoRecordPayment({ orderRef, amountReceived, receivedAt?, firaNumber?, note? })` and `PaymentsClient.skydoOutstanding()`.
+SDK equivalents: `PaymentsClient.skydoRecordPayment({ orderRef, receiptId, amountReceived, receivedAt?, firaNumber?, note? }, { confirm? })` and `PaymentsClient.skydoOutstanding()`.
 
 ### Resources and prompts
 

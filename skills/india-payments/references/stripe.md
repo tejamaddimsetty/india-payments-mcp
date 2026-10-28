@@ -50,7 +50,9 @@ export function verifyStripeWebhook(rawBody: string, header: string, whsec: stri
 
 Prefer the official `stripe` library's `stripe.webhooks.constructEvent(rawBody, sig, whsec)` when available. Dedupe on `event.id`.
 
-Refund events: `charge.refunded` fires when a refund is created (it may still be pending, and `amount_refunded` is cumulative), so this project reports it as type `unknown`. Use `refund.updated` (succeeded -> `refund.processed`, failed -> `refund.failed`) and `refund.failed` for the outcome.
+Refund events: `charge.refunded` fires when a refund is created (it may still be pending, and `amount_refunded` is cumulative), so this project reports it as type `unknown`. Subscribe to `refund.created`, `refund.updated` and `refund.failed` (a refund can be created already `succeeded`, with no later `refund.updated`). `refund.updated` counts only when its status changed. Refund events dedupe on `refund:<re_id>:<status>`.
+
+Refunding an uncaptured PaymentIntent (`requires_capture`) cancels it instead (full amount only, no `re_` id). Physical-goods exports also need a shipping address: pass `providerOptions.shipping_address_collection` on Checkout.
 
 ## Status mapping (PaymentIntent)
 

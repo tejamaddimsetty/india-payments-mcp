@@ -35,7 +35,7 @@ Integer paise (smallest subunit): Rs 299 = `29900`. Min 100 paise. Zero-decimal 
 | Settlements | `GET /v1/settlements`, `GET /v1/settlements/:id`, `GET /v1/settlements/recon/combined?year=YYYY&month=MM` | VERIFIED |
 | Payouts (RazorpayX) | `POST /v1/payouts`, header `X-Payout-Idempotency` required, IP allowlist required, separate product activation | VERIFIED |
 
-`receipt` max 40 chars (put your attempt ref here). `notes` max 15 pairs.
+`receipt` max 40 chars (put your attempt ref here). `notes` max 15 pairs. A second order with the same receipt is rejected as a duplicate; this project then returns the existing order if amount and currency match.
 
 ### Checkout flow (Standard Checkout)
 
@@ -91,7 +91,7 @@ Common webhook events: `payment.authorized`, `payment.captured`, `payment.failed
 - Webhook secret != key secret. Most "signature invalid" bugs are this, or verifying `JSON.stringify(req.body)` instead of raw bytes.
 - Same host for test and live: a live key in a dev env charges real cards.
 - Instant refunds are `speed: "optimum"` (the unified API calls it `instant`); they can fall back to normal; read `speed_processed`.
-- Subscriptions need `total_count`. The first payment is the mandate authorisation via Checkout with `subscription_id`.
+- Subscriptions need `total_count` or `end_at` (this project: `totalCount`, or `providerOptions.end_at`). The first payment is the mandate authorisation via Checkout with `subscription_id`.
 - Daily plans need `interval >= 7` (enforced before the call).
 - `customer_id` is not a create-subscription parameter; Razorpay fills it after authorisation. This project keeps your customer id in `notes.customer_id`.
 - Payment `method` values on the payment entity: `upi`, `card`, `netbanking`, `wallet`, `emi`, `paylater`. `cardless_emi` is not in the documented enum.
@@ -194,7 +194,7 @@ With split payments the response hash uses `status|splitInfo||||||` instead of `
 - surl/furl receive a cross-site POST: SameSite=Lax session cookies are not sent. Look the attempt up by `txnid`, not by session.
 - Webhook body format: docs disagree (JSON vs form-urlencoded). Accept both and verify the same reverse hash. PARTIAL. This project parses payment webhooks only; poll refund status instead of relying on refund webhooks.
 - `txnid` max 25 chars; nothing in the key tells test from live, so make sure `PAYMENTS_MODE` matches the key.
-- PayU de-duplication of refund ids is undocumented: on `OUTCOME_UNKNOWN`, check refund status before retrying.
+- PayU rejects a reused refund token (error 106 "Token already exists") instead of returning the earlier refund: on `OUTCOME_UNKNOWN`, check refund status before retrying, and retry with a NEW refundRef. error_code 102 (queued) counts as accepted.
 - Test-mode webhooks fire only for test transactions.
 - Subscriptions: Standing Instructions (`si=1`, `si_details`) and mandate APIs exist. UNVERIFIED
 
@@ -233,7 +233,7 @@ Status labels: VERIFIED / PARTIAL / UNVERIFIED (test in sandbox).
 | Create order | `POST /pg/orders` `{order_id (3–45, [A-Za-z0-9_-]), order_amount, order_currency, customer_details:{customer_id, customer_phone, customer_email?, customer_name?}, order_meta?:{return_url, notify_url, payment_methods}, order_expiry_time?, order_note?, order_tags?}` → `{cf_order_id, order_id, order_status, payment_session_id}` | VERIFIED |
 | Order | `GET /pg/orders/{order_id}` | UNVERIFIED (standard) |
 | Order payments | `GET /pg/orders/{order_id}/payments` | UNVERIFIED (standard) |
-| Refund | `POST /pg/orders/{order_id}/refunds` `{refund_amount, refund_id (3–40 **alphanumeric only**: `_` and `-` are rejected), refund_speed?: STANDARD\|INSTANT, refund_note?}`, header `x-idempotency-key` (UUID). Only within **6 months** of payment | VERIFIED |
+| Refund | `POST /pg/orders/{order_id}/refunds` `{refund_amount, refund_id (3–40 chars of letters, digits, `_` and `-`, as in Cashfree's examples), refund_speed?: STANDARD\|INSTANT, refund_note?}`, header `x-idempotency-key` (UUID). Only within **6 months** of payment | VERIFIED |
 | Refund status | `GET /pg/orders/{order_id}/refunds/{refund_id}` | UNVERIFIED (standard) |
 | Subscriptions | `POST /pg/plans`, `POST /pg/subscriptions` (+ mandate APIs). Body differs across versions | PARTIAL |
 | Settlements | "Get All Settlements" and "Get Settlements by Order ID" (path assumed `GET /pg/orders/{order_id}/settlements`) | UNVERIFIED path |
@@ -286,7 +286,7 @@ Webhook events normalised by this project: `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_F
 - Sending paise (`49900`) charges Rs 49,900. The most expensive bug possible with this gateway.
 - No signed return: always re-fetch.
 - Domain whitelist for JS checkout, separate for sandbox and production.
-- Refund window 6 months. `refund_id` is alphanumeric only: a refundRef with `_` or `-` is rejected.
+- Refund window 6 months. `refund_id` (our refundRef) is 3-40 chars of letters, digits, `_` and `-`, validated before the call.
 - Key-prefix checks (`TEST...`, `_test_`, `_prod_`) used by this project are a heuristic; Cashfree does not document key prefixes.
 - Pin `x-api-version`; don't copy samples written for another version.
 
@@ -418,7 +418,7 @@ Do not hard-code the legacy hosts. Test both staging hosts if one fails.
 ### Credentials
 
 `MID`, merchant key (exactly **16 bytes**, used as the AES key), `websiteName` (`WEBSTAGING` in staging, `DEFAULT` in prod, or what the dashboard shows). VERIFIED
-Env (this project): `PAYTM_MID`, `PAYTM_MERCHANT_KEY`, `PAYTM_WEBSITE` (optional; defaults WEBSTAGING / DEFAULT).
+Env (this project): `PAYTM_MID`, `PAYTM_MERCHANT_KEY`, `PAYTM_WEBSITE` (optional; defaults WEBSTAGING / DEFAULT), `PAYTM_VERIFY_RESPONSE_SIGNATURE` (optional, default `true`; `false` skips the `head.signature` check on API responses only, never on webhooks: use it only if valid responses are rejected).
 
 ### Amounts
 
@@ -427,13 +427,13 @@ Rupee **string**, max 2 decimals, in `txnAmount.value` (`"499.00"`). VERIFIED
 ### Checkout flow (JS Checkout)
 
 1. Server: `POST {host}/theia/api/v1/initiateTransaction?mid={MID}&orderId={ORDER}` with
-   `{head:{signature, channelId?:"WEB"|"WAP"}, body:{requestType:"Payment", mid, websiteName, orderId (≤50), callbackUrl?, txnAmount:{value:"499.00", currency:"INR"}, userInfo:{custId, mobile?}}}`. `custId` allows only letters, digits and `@ ! = _ $ .` (this project replaces other characters with `_`).
+   `{head:{signature, channelId?:"WEB"|"WAP"}, body:{requestType:"Payment", mid, websiteName, orderId (≤50; letters, digits and `@ - _ .` only), callbackUrl?, txnAmount:{value:"499.00", currency:"INR"}, userInfo:{custId, mobile?}}}`. `custId` allows only letters, digits and `@ ! = _ $ .` (this project replaces other characters with `_`).
    `head.signature` = checksum of `JSON.stringify(body)`. Response: `body.resultInfo.resultStatus` `S|F|U` and `body.txnToken` (**valid 15 minutes**). Verify the response `head.signature`. VERIFIED https://paytmpayments.com/docs/api/initiate-transaction-api
 2. Client: `<script src="{host}/merchantpgpui/checkoutjs/merchants/{MID}.js">`, then
    `window.Paytm.CheckoutJS.init({root:"", flow:"DEFAULT", data:{orderId, token, tokenType:"TXN_TOKEN", amount}, handler:{notifyMerchant}}).then(() => window.Paytm.CheckoutJS.invoke())`. VERIFIED https://paytmpayments.com/docs/jscheckout-invoke-payment
 3. Paytm POSTs **form key-value pairs** to `callbackUrl`: `ORDERID, MID, TXNID, TXNAMOUNT, STATUS (TXN_SUCCESS|TXN_FAILURE|PENDING), RESPCODE, RESPMSG, BANKTXNID, CHECKSUMHASH, …`. Verify CHECKSUMHASH, check ORDERID/TXNAMOUNT, then confirm with the status API. VERIFIED https://paytmpayments.com/docs/payment-status
 4. The dashboard webhook URL receives the same form payload for payments. Same verification.
-5. Refund notifications (Accept Refund / Success Refund) are JSON `{head:{signature}, body:{orderId, txnId, refId, refundId, refundAmount, totalRefundAmount, status:"SUCCESS"|"FAILED"}}`, signature over the raw `body` JSON. The documented FAILED refund notification has no signature, so this project rejects it: poll refund status for failures. VERIFIED (shape); signed-string convention PARTIAL
+5. Refund notifications (Accept Refund / Success Refund) are JSON `{head:{signature}, body:{orderId, txnId, refId, refundId, refundAmount, totalRefundAmount, status:"SUCCESS"|"FAILED"}}`, signature over the `body` JSON. This project always verifies them. Success Refund (credit to the customer initiated) → `refund.processed`; Accept Refund SUCCESS → type `unknown` (accepted, not yet initiated); Accept Refund FAILED (signed) → `refund.failed`. The unsigned Success Refund FAILED sample is rejected: poll refund status for those failures. VERIFIED (shape); signed-string convention PARTIAL
 
 ### Checksum algorithm
 
@@ -537,7 +537,7 @@ Integer paise, **min 100** (payments and refunds). VERIFIED
 
 | Purpose | Call | Status |
 |---|---|---|
-| Create payment | `POST /checkout/v2/pay` `{merchantOrderId (≤63, letters/digits/_/-), amount, expireAfter? (300–3600 s), paymentFlow:{type:"PG_CHECKOUT", merchantUrls:{redirectUrl}}, metaInfo?:{udf1..udf15}, prefillUserLoginDetails?:{phoneNumber}, disablePaymentRetry?}` → `{orderId, state:"PENDING", expireAt, redirectUrl}`. `metaInfo`: udf1..udf10 max 256 chars; udf11..udf15 max 50 chars of letters, digits and `_-+@.` (validated by this project) | VERIFIED |
+| Create payment | `POST /checkout/v2/pay` `{merchantOrderId (≤63, letters/digits/_/-), amount, expireAfter? (300–3600 s), paymentFlow:{type:"PG_CHECKOUT", merchantUrls:{redirectUrl}}, metaInfo?:{udf1..udf15}, prefillUserLoginDetails?:{phoneNumber}, disablePaymentRetry?}` → `{orderId, state:"PENDING", expireAt, redirectUrl}`. `metaInfo`: udf1..udf10 max 256 chars; udf11..udf15 max 50 chars of letters, digits and `_-+@.` (validated by this project; free-form metadata fills udf1..udf10, udf11..udf15 only by explicit key) | VERIFIED |
 | Order status | `GET /checkout/v2/order/{merchantOrderId}/status?details=false&errorContext=true` → `state` ∈ `PENDING\|COMPLETED\|FAILED`, `paymentDetails[]` | VERIFIED |
 | Refund | `POST /payments/v2/refund` `{merchantRefundId (≤63), originalMerchantOrderId, amount}` → `state: PENDING`. That `merchantRefundId` de-duplicates retries is assumed, not documented | VERIFIED (call) / UNVERIFIED (de-dupe) |
 | Refund status | `GET /payments/v2/refund/{merchantRefundId}/status` → `PENDING\|COMPLETED\|FAILED` (custom-checkout docs also list `CONFIRMED`) | VERIFIED |
@@ -654,7 +654,9 @@ export function verifyStripeWebhook(rawBody: string, header: string, whsec: stri
 
 Prefer the official `stripe` library's `stripe.webhooks.constructEvent(rawBody, sig, whsec)` when available. Dedupe on `event.id`.
 
-Refund events: `charge.refunded` fires when a refund is created (it may still be pending, and `amount_refunded` is cumulative), so this project reports it as type `unknown`. Use `refund.updated` (succeeded -> `refund.processed`, failed -> `refund.failed`) and `refund.failed` for the outcome.
+Refund events: `charge.refunded` fires when a refund is created (it may still be pending, and `amount_refunded` is cumulative), so this project reports it as type `unknown`. Subscribe to `refund.created`, `refund.updated` and `refund.failed` (a refund can be created already `succeeded`, with no later `refund.updated`). `refund.updated` counts only when its status changed. Refund events dedupe on `refund:<re_id>:<status>`.
+
+Refunding an uncaptured PaymentIntent (`requires_capture`) cancels it instead (full amount only, no `re_` id). Physical-goods exports also need a shipping address: pass `providerOptions.shipping_address_collection` on Checkout.
 
 ### Status mapping (PaymentIntent)
 
@@ -695,34 +697,37 @@ Full setup guide: `docs/skydo.md` in the india-payments-mcp repo. Status labels:
 - **Skydo has no public developer API, SDK or webhooks** (checked 2026-10-29). No developer portal, API reference, sandbox or API keys exist. `developer.skydo.com` is an empty placeholder; `api.skydo.com` is the dashboard's private backend (403 everywhere). VERIFIED-ABSENT
 - An API is on Skydo's roadmap since its Series A post of 10 Dec 2025 (developer APIs and webhooks promised, no date). Nothing has launched since.
 - Skydo's own FAQ: website checkout is not available. VERIFIED
-- Skydo's Terms (§25.8.12) forbid scraping, robots and deep-links against the platform. **Never automate the Skydo dashboard and never call `api.skydo.com`.** Do not invent endpoints.
+- Skydo's Terms of Use (clause 13, "Restrictions on the use of the Platform", version of 09 Apr 2026) prohibit scrapers, bots and other automated access. **Never automate the Skydo dashboard and never call `api.skydo.com`.** Do not invent endpoints.
 
 ### What Skydo is for
 
-Indian exporters, freelancers and agencies receiving **foreign-currency** payments from abroad: standing local receiving accounts in USD, GBP, EUR, CAD, AUD, AED and SGD, plus a SWIFT account for 30+ other currencies. Settled to INR with a FIRA. Not domestic INR checkout, no cards or UPI from Indian customers.
+Indian exporters, freelancers and agencies receiving **foreign-currency** payments from abroad: standing local receiving accounts in USD, GBP, EUR, CAD, AUD, AED and SGD, plus a SWIFT account (32 currencies). Settled to INR with a FIRA. Not domestic INR checkout, no cards or UPI from Indian customers.
 
-Limits (Skydo FAQ): minimum USD 50 per payment, no recurring payments, no refunds through any API. Every incoming transfer must be matched to an invoice in Skydo, so the client must quote a reference. Fees change; see Skydo's site. This project does not compute Skydo fees.
+Limits (Skydo FAQ): minimum USD 50 per payment (or the equivalent); InstaLinks do not support recurring payments and Skydo has no subscription product (raise one invoice per period); Skydo cannot initiate a refund directly once a payment is settled, and there is no refund API. Every incoming transfer must be matched to an invoice in Skydo, so the client must quote a reference. Fees change; see Skydo's site. This project does not compute Skydo fees.
 
 ### What can be automated: Skydo's own two paths
 
 This project's `skydo` adapter never contacts Skydo. It automates the two paths Skydo itself supports. Configure at least one.
 
-#### 1. Zoho Books bridge (fully automatic)
+#### 1. Zoho Books bridge (automatic once connected)
 
 Skydo has a native Zoho Books integration: it imports new Zoho invoices about every 10 minutes, and when the money arrives it marks the Zoho invoice paid and attaches the FIRA PDF. Zoho Books has a public API, so:
 
-- `createPayment` creates a Zoho Books invoice (`reference_number` = orderRef, one line using `ZOHO_ITEM_ID`), marks it sent, and returns `checkout.type: "manual"` with the invoice link. It first looks the reference up, so a repeat call returns the same invoice (a different amount or currency for the same orderRef is rejected).
-- The customer must already exist in Zoho Books with the invoice currency, picked by `customer.email` or `providerOptions.zohoCustomerId`. A currency mismatch is rejected. Indian Zoho organisations should set GST treatment "Overseas" for foreign clients.
-- Optional `providerOptions`: `sendEmail` (true = Zoho emails the invoice), `dueDate`, `exchangeRate`.
-- `getPaymentStatus` / `verifyPayment` read the Zoho invoice (`verifiedVia: "status_api"`); `raw.firaAttached` says whether Skydo attached the FIRA. Poll it (for example every 15 minutes): there is no webhook.
+- `createPayment` creates a Zoho Books invoice (`reference_number` = orderRef, one line using `ZOHO_ITEM_ID`), marks it sent, and returns `checkout.type: "manual"` with the invoice link. It first looks the reference up (exact match, all pages), so a repeat call returns the same invoice; a different amount or currency for the same orderRef is rejected, and so is an orderRef whose only invoice was voided. A duplicate created by a concurrent process is voided, and a draft left by a failed attempt is marked sent on retry.
+- Skydo documents that Zoho invoices sync, but not API-created invoices specifically: during setup, confirm the first invoice appears in the Skydo dashboard within ~10 minutes. UNVERIFIED until you do.
+- The customer must already exist in Zoho Books with the invoice currency, picked by `customer.email` (exact match on the primary contact's email; two active matches or only an inactive one is rejected) or `providerOptions.zohoCustomerId`. A currency mismatch is rejected. Indian Zoho organisations should set GST treatment "Overseas" for foreign clients. Turn off Zoho online payment gateways on these invoices, or clients can pay outside Skydo (no FIRA).
+- Optional `providerOptions`: `sendEmail` (true = Zoho emails the invoice), `dueDate`, `exchangeRate` (pass it if Zoho rejects an invoice in a currency other than the organisation's base currency).
+- `getPaymentStatus` / `verifyPayment` read the full Zoho invoice (`verifiedVia: "status_api"`); an invoice whose `reference_number` is not the orderRef is rejected. `raw.firaAttached` says whether Skydo attached the FIRA. Poll it (for example every 15 minutes): there is no webhook.
 - One-time human steps: Skydo profile > **Connect Skydo to Zoho** (only invoices created AFTER connecting are imported; choose all currencies or international only); create a service item in Zoho; create a Zoho API Console Self Client and a refresh token with scopes `ZohoBooks.invoices.ALL,ZohoBooks.contacts.READ`.
-- Env: `ZOHO_DATA_CENTER` (com, eu, in, com.au, jp, ca, com.cn, sa), `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_ORGANIZATION_ID`, `ZOHO_ITEM_ID`; optional `ZOHO_ACCOUNTS_URL`. Set all six required ones or none: a partial set fails with `CONFIG_MISSING`.
+- Env: `ZOHO_DATA_CENTER` (com, eu, in, com.au, jp, ca, com.cn, sa, ae, uk, sg), `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_ORGANIZATION_ID`, `ZOHO_ITEM_ID`; optional `ZOHO_ACCOUNTS_URL`. Set all six required ones or none: a partial set fails with `CONFIG_MISSING`.
 
 Zoho invoice status → unified:
 
 | Zoho | Unified |
 |---|---|
-| `paid` | `captured` |
+| `paid`, payments cover the total | `captured` |
+| `paid` with a write-off (bad debt) | `failed` |
+| `paid` but closed with credit notes (payments below total) | `unknown` |
 | `partially_paid` | `pending` |
 | `void` | `cancelled` |
 | `draft` / `sent` / `viewed` / `unpaid` / `overdue` | `created` |
@@ -731,8 +736,10 @@ Zoho invoice status → unified:
 #### 2. Receiving accounts + ledger (semi-automatic, no Zoho)
 
 - Copy your account details once from Skydo dashboard > International Accounts into `SKYDO_RECEIVING_ACCOUNTS`: a JSON array (or a path to a .json file) of `{"currency":"USD","label":"...","details":{"Account number":"...", ...}}`. `"*"` is the fallback account (for example SWIFT) for any other currency.
-- `createPayment` returns plain-text bank-transfer instructions for the invoice currency with the orderRef as payment reference, and records the expected payment in a JSON ledger (`SKYDO_LEDGER_FILE`, default `~/.india-payments-mcp/skydo-ledger.json`; atomic writes, survives restarts). `SKYDO_PAYEE_NAME` adds your business name.
-- The ledger cannot see payments. When Skydo notifies you (email/WhatsApp/dashboard/FIRA), record the receipt: MCP `payments_skydo_record_payment` (`order_ref`, `amount_received` in minor units of the invoice currency, optional `received_at`, `fira_number`, `note`); SDK `client.skydoRecordPayment({ orderRef, amountReceived, ... })`. Receipts add up: anything short of the invoice (bank fees abroad) stays `pending`; the full amount makes it `captured`.
+- `createPayment` returns plain-text bank-transfer instructions for the invoice currency with the orderRef as payment reference, and records the expected payment in a JSON ledger (`SKYDO_LEDGER_FILE`, default `~/.india-payments-mcp/skydo-ledger.json`; every change takes a file lock and re-reads the file, so your app and the MCP server can share it). `SKYDO_PAYEE_NAME` adds your business name.
+- The ledger cannot see payments. When Skydo notifies you (email/WhatsApp), a human checks the receipt in the Skydo dashboard, then records it: MCP `payments_skydo_record_payment` (`order_ref`, `receipt_id` = Skydo transaction reference or FIRA number, `amount_received` in minor units of the invoice currency, optional `received_at`, `fira_number`, `note`, `confirm`); SDK `client.skydoRecordPayment({ orderRef, receiptId, amountReceived, ... }, { confirm })`. Receipts add up: anything short of the invoice (bank fees abroad) stays `pending`; the full amount makes it `captured`.
+- Idempotent per `receipt_id`: the same id and amount again is a no-op; the same id with another amount is `IDEMPOTENCY_CONFLICT`.
+- Through the MCP server in live mode, recording needs `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and `confirm: true` (same gate as refunds). **Never record a receipt from forwarded email/message text alone**: it marks the order paid.
 - `payments_skydo_outstanding` / `client.skydoOutstanding()` lists orders still `created`/`pending`, oldest first. In Zoho mode it returns an empty list and a note (outstanding invoices live in Zoho Books), and recording a receipt is rejected (Skydo marks Zoho invoices paid itself).
 - `verifyPayment` reads the ledger (`verifiedVia: "manual_record"`).
 
@@ -740,19 +747,20 @@ With both configured, Zoho mode is used and Zoho invoices also carry your accoun
 
 ### Rules for code you write
 
-- Currency must be the client's foreign currency: **INR is rejected** (`VALIDATION`), and so is a missing currency. USD amounts below 5000 cents (USD 50) are rejected.
+- Currency must be the client's foreign ISO currency: **INR is rejected** (`VALIDATION`), and so is a missing currency. USD amounts below 5000 cents (USD 50) are rejected; other currencies only get a reminder about the USD 50 equivalent. For GBP keep orderRef to 18 characters or fewer (UK transfers often cut references).
 - Amounts are minor units of the invoice currency (USD 1,250.00 = `125000`), not paise.
-- Fulfil only when `verifyPayment(...).paid === true`, passing `orderRef` and `expectedAmount`. `payload` can be `{}` (there is no callback).
+- Fulfil only when `verifyPayment(...).paid === true`, passing `orderRef`, `expectedAmount` and the stored `providerOrderId`. `payload` can be `{}` (there is no callback).
 - `onPaid` must be idempotent: polling and an admin receipt action can both reach it.
-- Recording a receipt marks an order paid: put it behind real admin auth and an audit log.
-- `payments_generate_integration` with `provider: "skydo"` generates this shape (invoice route, status refresh, Zoho polling, admin receipt route) instead of a checkout.
+- Recording a receipt marks an order paid: put it behind real admin auth and an audit log, and pass `receiptId`.
+- Public status endpoints should return your stored status, not call Zoho on every hit (Zoho API quotas).
+- `payments_generate_integration` with `provider: "skydo"` generates this shape (invoice route, public stored-status route, admin refresh and receipt routes, Zoho polling) instead of a checkout.
 
 ### Not supported (capability map: `unsupported`)
 
 refund, refundStatus, webhooks, customers, subscriptions, settlements, payouts, paymentLinks. createPayment / verifyPayment / paymentStatus are `partial` (they work through Zoho or the ledger, never through Skydo). Checkout type is always `manual`.
 
 - InstaLinks (Skydo payment links) can only be created by hand in the dashboard and each link is single-use. No URL pattern or prefill exists. VERIFIED
-- Refunds to a foreign client go through Skydo support.
+- Refunds: no API, and Skydo cannot initiate a refund directly once a payment is settled; returning money is arranged outside Skydo.
 - INR settlements and FIRAs: Skydo dashboard (Analytics & Reports > Reports tab exports).
 
 ### Mock mode

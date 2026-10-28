@@ -103,7 +103,7 @@ For checkout types, amount units, signature schemes and onboarding notes per gat
 | `payments_cancel_subscription` | Cancels now or at cycle end. Live mode needs a double gate | **stops billing** |
 | `payments_list_settlements` | Lists settlements for reconciliation | read-only |
 | `payments_generate_integration` | Generates server routes, client checkout, env template and test checklist for a framework | read-only (returns files) |
-| `payments_skydo_record_payment` | **Skydo ledger mode only.** Records money Skydo told you arrived for an order (minor units of the invoice currency). Partial receipts keep the order `pending` | marks an order paid in the local ledger |
+| `payments_skydo_record_payment` | **Skydo ledger mode only.** Records a receipt a human has checked in the Skydo dashboard (minor units of the invoice currency). Idempotent per `receipt_id`; partial receipts keep the order `pending`. Live mode needs the double gate | **can mark an order paid** |
 | `payments_skydo_outstanding` | **Skydo ledger mode.** Lists orders still waiting for money, oldest first | read-only |
 | `payments_mock_complete_payment` | **Mock mode only.** Simulates the customer paying or failing and returns a signed callback payload | mock state only |
 
@@ -184,12 +184,12 @@ A complete runnable version is in [`examples/express-checkout`](examples/express
 
 ## Skydo
 
-Skydo (cross-border collections for Indian exporters and freelancers) has **no public developer API or webhooks**; an API has been on its roadmap since December 2025, and its Terms forbid automating the dashboard. This project never contacts Skydo. Instead the Skydo adapter automates the two paths Skydo supports:
+Skydo (cross-border collections for Indian exporters and freelancers) has **no public developer API or webhooks**; an API has been on its roadmap since December 2025, and its Terms of Use prohibit automated access to the platform. This project never contacts Skydo. Instead the Skydo adapter automates the two paths Skydo supports:
 
 - **Zoho Books bridge** (set all six `ZOHO_*` variables): `payments_create_payment` creates a Zoho Books invoice with your order reference. Skydo's native Zoho integration imports it, and when the money arrives Skydo marks it paid and attaches the FIRA. `payments_get_status` / `payments_verify_payment` read that back.
-- **Receiving accounts + ledger** (set `SKYDO_RECEIVING_ACCOUNTS`): `payments_create_payment` returns bank-transfer instructions for your Skydo account in the client's currency, with the order reference, and tracks the payment in a local JSON ledger. You confirm receipts with `payments_skydo_record_payment`.
+- **Receiving accounts + ledger** (set `SKYDO_RECEIVING_ACCOUNTS`): `payments_create_payment` returns bank-transfer instructions for your Skydo account in the client's currency, with the order reference, and tracks the payment in a local JSON ledger. You confirm each receipt with `payments_skydo_record_payment` after checking it in the Skydo dashboard. The ledger file can be shared by your app and the MCP server (file lock).
 
-Skydo payments are foreign currency only (INR is rejected), at least USD 50, and have no refunds, webhooks, recurring payments or API payment links. Setup, the full flow and troubleshooting are in **[docs/skydo.md](docs/skydo.md)**.
+Skydo payments are foreign currency only (INR is rejected), at least USD 50 (or the equivalent), and have no refunds, webhooks, recurring payments or API payment links. Skydo documents its Zoho sync but not API-created invoices specifically, so confirm the first invoice appears in your Skydo dashboard. Setup, the full flow and troubleshooting are in **[docs/skydo.md](docs/skydo.md)**.
 
 ---
 
@@ -223,7 +223,7 @@ Set the mode with `PAYMENTS_MODE`. Adapters cross-check key prefixes where the g
 
 ## Safety rails
 
-- **Live mutations are double-gated in the MCP server.** In `live` mode, `payments_refund` and `payments_cancel_subscription` fail with `LIVE_MUTATION_BLOCKED` unless the server runs with `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` **and** the call passes `confirm: true`. Agents are told to get human approval before setting `confirm`. The gate is on because the MCP server creates its client with `guardLiveMutations: true`; SDK users, whose apps have their own authorisation, are not gated unless they pass that option. Webhook simulation is disabled in live mode.
+- **Live mutations are double-gated in the MCP server.** In `live` mode, `payments_refund`, `payments_cancel_subscription` and `payments_skydo_record_payment` fail with `LIVE_MUTATION_BLOCKED` unless the server runs with `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` **and** the call passes `confirm: true`. Agents are told to get human approval before setting `confirm`. The gate is on because the MCP server creates its client with `guardLiveMutations: true`; SDK users, whose apps have their own authorisation, are not gated unless they pass that option. Webhook simulation is disabled in live mode.
 - **Refunds are idempotent by `refund_ref`.** The same `refund_ref` with the same request returns the stored result. The same `refund_ref` with a different request fails with `IDEMPOTENCY_CONFLICT`.
 - **Order creation is idempotent by `idempotency_key`** (default: `order_ref`).
 - **Money-moving POSTs are never retried blindly.** Only GETs and requests the gateway de-duplicates are retried. When a non-retry-safe request times out or gets a 5xx, the error is `OUTCOME_UNKNOWN`: it may or may not have happened, so look the payment or refund up before retrying.
