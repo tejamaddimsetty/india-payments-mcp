@@ -234,14 +234,18 @@ describe('stripe', () => {
 
   it('refunds with refundRef as Idempotency-Key and a Stripe-legal reason', async () => {
     const { gw, requests } = gateway([
+      { match: 'GET https://api.stripe.com/v1/payment_intents/pi_1', body: { id: 'pi_1', object: 'payment_intent', amount: 1000, currency: 'inr', status: 'succeeded' } },
       { match: 'POST https://api.stripe.com/v1/refunds', body: { id: 're_1', amount: 300, status: 'pending', payment_intent: 'pi_1', metadata: { refund_ref: 'rf_1' } } },
       { match: 'GET https://api.stripe.com/v1/refunds/re_1', body: { id: 're_1', amount: 300, status: 'succeeded', metadata: { refund_ref: 'rf_1' } } },
       { match: 'GET https://api.stripe.com/v1/refunds?', body: { data: [{ id: 're_0', amount: 1, status: 'failed', metadata: { refund_ref: 'other' } }, { id: 're_1', amount: 300, status: 'canceled', metadata: { refund_ref: 'rf_1' } }] } },
     ]);
     const r = await gw.refund!({ orderRef: 'ord_1', providerPaymentId: 'pi_1', amount: 300, refundRef: 'rf_1', reason: 'Requested_By_Customer' });
     expect(r).toMatchObject({ providerRefundId: 're_1', status: 'pending', amount: 300 });
-    expect(requests[0]!.headers['idempotency-key']).toBe('rf_1');
-    expect(form(requests[0]!.body)).toEqual({
+    // The PaymentIntent is checked first (GET, no Idempotency-Key), then refunded.
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.headers['idempotency-key']).toBeUndefined();
+    expect(requests[1]!.headers['idempotency-key']).toBe('rf_1');
+    expect(form(requests[1]!.body)).toEqual({
       payment_intent: 'pi_1',
       amount: '300',
       reason: 'requested_by_customer',
@@ -250,7 +254,7 @@ describe('stripe', () => {
     });
 
     await gw.refund!({ orderRef: 'ord_1', providerPaymentId: 'pi_1', refundRef: 'rf_2', reason: 'customer changed mind' });
-    const second = form(requests[1]!.body);
+    const second = form(requests[3]!.body);
     expect(second.reason).toBeUndefined();
     expect(second['metadata[reason]']).toBe('customer changed mind');
     expect(second.amount).toBeUndefined();
@@ -260,6 +264,25 @@ describe('stripe', () => {
     expect((await gw.getRefundStatus!({ refundRef: 'rf_1', providerRefundId: 're_1' })).status).toBe('processed');
     const byRef = await gw.getRefundStatus!({ refundRef: 'rf_1', providerPaymentId: 'pi_1' });
     expect(byRef).toMatchObject({ providerRefundId: 're_1', status: 'failed' });
+  });
+
+  it('refund of an uncaptured PaymentIntent cancels it instead (P13)', async () => {
+    const { gw, requests } = gateway([
+      { match: 'GET https://api.stripe.com/v1/payment_intents/pi_auth', body: { id: 'pi_auth', object: 'payment_intent', amount: 5000, currency: 'inr', status: 'requires_capture' } },
+      { match: 'POST https://api.stripe.com/v1/payment_intents/pi_auth/cancel', body: { id: 'pi_auth', object: 'payment_intent', amount: 5000, currency: 'inr', status: 'canceled' } },
+    ]);
+    const r = await gw.refund!({ orderRef: 'ord_a', providerPaymentId: 'pi_auth', refundRef: 'rf_a', reason: 'duplicate' });
+    expect(r).toMatchObject({ status: 'processed', amount: 5000, refundRef: 'rf_a', providerRefundId: undefined });
+    expect((r.raw as { note: string }).note).toMatch(/cancelled instead of refunded/);
+    expect(requests.map((q) => `${q.method} ${q.url}`)).toEqual([
+      'GET https://api.stripe.com/v1/payment_intents/pi_auth',
+      'POST https://api.stripe.com/v1/payment_intents/pi_auth/cancel',
+    ]);
+    expect(requests[1]!.headers['idempotency-key']).toBe('rf_a');
+    expect(form(requests[1]!.body)).toEqual({ cancellation_reason: 'duplicate' });
+    // A partial amount cannot be "refunded" from an authorisation.
+    await expect(gw.refund!({ orderRef: 'ord_a', providerPaymentId: 'pi_auth', refundRef: 'rf_b', amount: 1000 })).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(requests).toHaveLength(3); // only the GET for the rejected call
   });
 
   it('webhook signature matches the documented HMAC(t.body) known-answer vector', () => {
@@ -301,16 +324,30 @@ describe('stripe', () => {
       const rawBody = JSON.stringify({ id: `evt_${type}`, type, created: NOW, data: { object, previous_attributes } });
       return gw.parseWebhook({ headers: signed(rawBody), rawBody });
     };
-    expect(await parse('refund.updated', { id: 're_1', amount: 300, currency: 'inr', status: 'succeeded', payment_intent: 'pi_1', metadata: { refund_ref: 'rf_1', order_ref: 'o1' } }))
-      .toMatchObject({ type: 'refund.processed', providerRefundId: 're_1', refundRef: 'rf_1', orderRef: 'o1', providerPaymentId: 'pi_1' });
-    expect((await parse('refund.updated', { id: 're_2', amount: 1, status: 'failed', metadata: {} })).type).toBe('refund.failed');
+    const succeeded = { id: 're_1', amount: 300, currency: 'inr', status: 'succeeded', payment_intent: 'pi_1', metadata: { refund_ref: 'rf_1', order_ref: 'o1' } };
+    expect(await parse('refund.updated', succeeded, { status: 'pending' }))
+      .toMatchObject({ id: 'refund:re_1:succeeded', type: 'refund.processed', providerRefundId: 're_1', refundRef: 'rf_1', orderRef: 'o1', providerPaymentId: 'pi_1' });
+    // P5: a metadata / ARN update of an already-succeeded refund is not another refund.processed.
+    expect(await parse('refund.updated', succeeded, { metadata: {} })).toMatchObject({ id: 'refund:re_1:succeeded', type: 'unknown', providerEventType: 'refund.updated' });
+    expect((await parse('refund.updated', succeeded)).type).toBe('unknown');
+    // refund.created already `succeeded` counts, and shares the dedupe id with the transition above.
+    expect(await parse('refund.created', succeeded)).toMatchObject({ id: 'refund:re_1:succeeded', type: 'refund.processed' });
+    expect(await parse('refund.updated', { id: 're_2', amount: 1, status: 'failed', metadata: {} }, { status: 'pending' })).toMatchObject({ id: 'refund:re_2:failed', type: 'refund.failed' });
     // charge.refunded fires on refund creation (refund may still be pending; amount is cumulative): not a final signal.
     const chargeRefunded = await parse('charge.refunded', { id: 'ch_1', amount: 1000, amount_refunded: 400, payment_intent: 'pi_1', currency: 'inr' });
     expect(chargeRefunded).toMatchObject({ type: 'unknown', providerEventType: 'charge.refunded', providerPaymentId: 'pi_1' });
     expect(chargeRefunded.amount).toBeUndefined();
     expect((await parse('refund.created', { id: 're_3', amount: 400, status: 'pending', metadata: {} })).type).toBe('unknown');
     expect((await parse('refund.failed', { id: 're_4', amount: 400, status: 'failed', metadata: {} })).type).toBe('refund.failed');
-    expect((await parse('charge.dispute.created', { id: 'dp_1', amount: 1000, charge: 'ch_1', payment_intent: 'pi_1' })).type).toBe('dispute.created');
+    // P11: the dispute's own metadata is not the order's; orderRef only from expanded charge / PI.
+    const dispute = await parse('charge.dispute.created', { id: 'dp_1', amount: 1000, charge: 'ch_1', payment_intent: 'pi_1', metadata: { order_ref: 'wrong' } });
+    expect(dispute).toMatchObject({ type: 'dispute.created', providerPaymentId: 'pi_1', amount: 1000 });
+    expect(dispute.orderRef).toBeUndefined();
+    expect(await parse('charge.dispute.created', { id: 'dp_2', amount: 1, charge: { id: 'ch_2', amount: 1, amount_refunded: 0, payment_intent: 'pi_2', metadata: { order_ref: 'o2' } }, payment_intent: null }))
+      .toMatchObject({ orderRef: 'o2', providerPaymentId: 'pi_2' });
+    expect(await parse('charge.dispute.created', { id: 'dp_3', amount: 1, charge: 'ch_3', payment_intent: { id: 'pi_3', metadata: { order_ref: 'o3' } } }))
+      .toMatchObject({ orderRef: 'o3', providerPaymentId: 'pi_3' });
+    expect((await parse('charge.dispute.created', { id: 'dp_4', amount: 1, charge: 'ch_4' })).providerPaymentId).toBe('ch_4');
     expect((await parse('customer.subscription.deleted', { id: 'sub_1', status: 'canceled', metadata: { subscription_ref: 's1' } }))).toMatchObject({ type: 'subscription.cancelled', orderRef: 's1' });
     expect((await parse('customer.subscription.updated', { id: 'sub_1', status: 'past_due' }, { status: 'active' })).type).toBe('subscription.halted');
     expect((await parse('customer.subscription.updated', { id: 'sub_1', status: 'active' }, { metadata: {} })).type).toBe('unknown');

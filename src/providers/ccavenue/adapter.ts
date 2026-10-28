@@ -162,8 +162,9 @@ export function mapCcavenueStatus(s: string | undefined): PaymentStatus {
     case 'system refund':
     case 'auto-reversed':
       return 'refunded';
-    case 'partially refunded':
+    case 'partially refunded': // UNVERIFIED: no source lists this value; kept for safety
       return 'partially_refunded';
+    // 'Chargeback' appears in a third-party CCAvenue-derived enum; it is not a refund, so it stays 'unknown'.
     default:
       return 'unknown';
   }
@@ -426,16 +427,13 @@ class CcavenueGateway implements PaymentGateway {
         hint: 'Get it from verifyPayment(...).providerPaymentId or getPaymentStatus(...).providerPaymentId.',
       });
     }
-    let amount = input.amount;
-    let currency = 'INR';
+    // Look the order up even for a partial refund: refund_amount must be formatted in the order's currency.
+    const s = await this.getPaymentStatus({ orderRef: input.orderRef, providerPaymentId: input.providerPaymentId });
+    const currency = s.currency ?? 'INR';
+    // CCAvenue needs an explicit refund_amount; a "full refund" means the order amount.
+    const amount = input.amount ?? s.amount;
     if (amount === undefined) {
-      // CCAvenue needs an explicit refund_amount; a "full refund" means the order amount.
-      const s = await this.getPaymentStatus({ orderRef: input.orderRef });
-      if (s.amount === undefined) {
-        throw new PaymentError('VALIDATION', 'Could not determine the order amount for a full refund; pass amount explicitly.', { provider: 'ccavenue' });
-      }
-      amount = s.amount;
-      currency = s.currency ?? 'INR';
+      throw new PaymentError('VALIDATION', 'Could not determine the order amount for a full refund; pass amount explicitly.', { provider: 'ccavenue' });
     }
     assertMinorUnits(amount);
     // Not auto-retried: de-duplication on refund_ref_no is not documented.

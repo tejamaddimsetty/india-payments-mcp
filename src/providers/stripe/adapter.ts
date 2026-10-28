@@ -585,7 +585,20 @@ class StripeGateway implements PaymentGateway {
       });
     }
     if (input.amount !== undefined) assertMinorUnits(input.amount);
+    if (input.refundRef.length > STRIPE_MAX_IDEMPOTENCY_KEY) {
+      // Checked here too so nothing (not even the PaymentIntent lookup below) is sent.
+      throw new PaymentError('VALIDATION', `Stripe Idempotency-Key for create_refund is ${input.refundRef.length} characters; Stripe allows at most ${STRIPE_MAX_IDEMPOTENCY_KEY}.`, {
+        provider: 'stripe',
+        hint: 'Shorten refundRef.',
+      });
+    }
     const reason = input.reason?.trim().toLowerCase();
+    if (target.startsWith('pi_')) {
+      // An uncaptured PaymentIntent (requires_capture) cannot be refunded: "you must cancel the
+      // PaymentIntent" (docs.stripe.com/refunds). Cancelling releases the whole authorisation.
+      const { data: pi } = await this.call<StripePaymentIntent>('GET', `/payment_intents/${encodeURIComponent(target)}`, 'fetch_payment_intent');
+      if (pi.status === 'requires_capture') return this.cancelUncaptured(pi, input, reason);
+    }
     const body: Record<string, unknown> = {
       ...(target.startsWith('pi_') ? { payment_intent: target } : { charge: target }),
       amount: input.amount,
@@ -606,6 +619,37 @@ class StripeGateway implements PaymentGateway {
       status: mapRefundStatus(data.status),
       amount: data.amount,
       raw: data,
+    };
+  }
+
+  /**
+   * "Refund" of an authorised-but-uncaptured PaymentIntent: POST /payment_intents/{id}/cancel with
+   * Idempotency-Key = refundRef. No refund object exists, so providerRefundId is undefined and the
+   * result's raw carries a note plus the cancelled PaymentIntent. Partial amounts are rejected: to keep
+   * part of the money, capture with a lower amount_to_capture instead.
+   */
+  private async cancelUncaptured(pi: StripePaymentIntent, input: RefundInput, reason: string | undefined): Promise<RefundResult> {
+    if (input.amount !== undefined && input.amount !== pi.amount) {
+      throw new PaymentError('VALIDATION', `PaymentIntent ${pi.id} is uncaptured (requires_capture): it can only be cancelled in full, not refunded for ${input.amount}.`, {
+        provider: 'stripe',
+        hint: 'Omit amount to cancel (release) the whole authorisation, or capture with a lower amount_to_capture to keep part of it.',
+      });
+    }
+    const cancellation_reason = reason && REFUND_REASONS.has(reason) ? reason : undefined;
+    const { data } = await this.call<StripePaymentIntent>('POST', `/payment_intents/${encodeURIComponent(pi.id)}/cancel`, 'cancel_payment_intent', {
+      body: { cancellation_reason },
+      idempotencyKey: input.refundRef,
+    });
+    return {
+      provider: 'stripe',
+      refundRef: input.refundRef,
+      providerRefundId: undefined,
+      status: data.status === 'canceled' ? 'processed' : 'unknown',
+      amount: pi.amount,
+      raw: {
+        note: 'The PaymentIntent was uncaptured (requires_capture), so it was cancelled instead of refunded: the authorisation is released and no money moved. There is no refund object (no re_ id); getRefundStatus will not find it.',
+        payment_intent: data,
+      },
     };
   }
 
@@ -721,9 +765,17 @@ class StripeGateway implements PaymentGateway {
     if (t === 'refund.created' || t === 'refund.updated' || t === 'refund.failed' || t === 'charge.refund.updated') {
       const r = obj as unknown as StripeRefund;
       const rs = mapRefundStatus(r.status);
+      // refund.updated (and the deprecated charge.refund.updated) also fire for metadata / ARN updates
+      // of an already-final refund, so only a status transition (previous_attributes.status) counts.
+      // refund.created can already be `succeeded` and refund.failed is final, so they need no check.
+      const isUpdate = t === 'refund.updated' || t === 'charge.refund.updated';
+      const transition = !isUpdate || event.data.previous_attributes?.status !== undefined;
       return {
         ...base,
-        type: rs === 'processed' ? 'refund.processed' : rs === 'failed' ? 'refund.failed' : 'unknown',
+        // Dedupe key per refund + status: refund.created(succeeded) and a later refund.updated for the
+        // same status collapse to one event id.
+        id: `refund:${r.id}:${r.status ?? 'unknown'}`,
+        type: !transition ? 'unknown' : rs === 'processed' ? 'refund.processed' : rs === 'failed' ? 'refund.failed' : 'unknown',
         orderRef: md.order_ref,
         providerPaymentId: r.payment_intent ?? r.charge ?? undefined,
         providerRefundId: r.id,
@@ -749,12 +801,23 @@ class StripeGateway implements PaymentGateway {
     }
 
     if (t === 'charge.dispute.created') {
-      const d = obj as { id: string; amount?: number; currency?: string; charge?: string; payment_intent?: string | null };
+      // data.object is a Dispute: its metadata is the dispute's own, not the order's. orderRef comes from
+      // the charge / PaymentIntent metadata only when Stripe sent them expanded; otherwise it is left
+      // undefined and the app maps providerPaymentId (the pi_ id, else ch_) back to its order.
+      const d = obj as {
+        id: string;
+        amount?: number;
+        currency?: string;
+        charge?: string | StripeCharge | null;
+        payment_intent?: string | StripePaymentIntent | null;
+      };
+      const ch = d.charge && typeof d.charge === 'object' ? d.charge : undefined;
+      const pi = d.payment_intent && typeof d.payment_intent === 'object' ? d.payment_intent : undefined;
       return {
         ...base,
         type: 'dispute.created',
-        orderRef: md.order_ref,
-        providerPaymentId: d.payment_intent ?? d.charge,
+        orderRef: pi?.metadata?.order_ref ?? ch?.metadata?.order_ref,
+        providerPaymentId: strOrId(d.payment_intent) ?? (ch ? ch.payment_intent ?? ch.id : (d.charge as string | null | undefined) ?? undefined),
         amount: d.amount,
         currency: upper(d.currency),
       };
@@ -818,6 +881,7 @@ class StripeGateway implements PaymentGateway {
 
     let type: string;
     let object: Record<string, unknown>;
+    let previous_attributes: Record<string, unknown> | undefined;
     if (input.type === 'payment.succeeded') {
       type = 'checkout.session.completed';
       object = {
@@ -856,6 +920,8 @@ class StripeGateway implements PaymentGateway {
         payment_intent: piId,
         metadata: { order_ref: input.orderRef, refund_ref: input.refundRef ?? '' },
       };
+      // A real pending -> succeeded transition, as Stripe sends it.
+      previous_attributes = { status: 'pending' };
     }
     const rawBody = JSON.stringify({
       id: `evt_sim${sim()}`,
@@ -864,7 +930,7 @@ class StripeGateway implements PaymentGateway {
       created: now,
       livemode: false,
       type,
-      data: { object },
+      data: previous_attributes ? { object, previous_attributes } : { object },
     });
     return {
       provider: 'stripe',

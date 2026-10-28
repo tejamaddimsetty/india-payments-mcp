@@ -153,8 +153,18 @@ class RazorpayGateway implements PaymentGateway {
       notes: { order_ref: input.orderRef, ...(input.metadata ?? {}) },
       ...(input.providerOptions ?? {}),
     };
-    // Order creation is not idempotent on Razorpay, so it is never auto-retried.
-    const { data: order } = await this.call<RzpOrder>('POST', '/orders', 'create_order', body);
+    // Never auto-retried. Razorpay rejects a second order with the same receipt ("Duplicate request"),
+    // so a caller retrying after a lost response gets the existing order back via GET /orders?receipt=.
+    let order: RzpOrder;
+    try {
+      ({ data: order } = await this.call<RzpOrder>('POST', '/orders', 'create_order', body));
+    } catch (err) {
+      if (!(err instanceof PaymentError && err.code === 'PROVIDER_ERROR' && /duplicate/i.test(err.providerMessage ?? ''))) throw err;
+      const { data: found } = await this.call<{ items: RzpOrder[] }>('GET', `/orders?receipt=${encodeURIComponent(input.orderRef)}`, 'find_order_by_receipt', undefined, true);
+      const existing = found.items.find((o) => o.receipt === input.orderRef);
+      if (!existing || existing.amount !== input.amount || existing.currency !== currency) throw err;
+      order = existing;
+    }
 
     const options: Record<string, unknown> = {
       key: this.creds.keyId,
@@ -516,15 +526,16 @@ class RazorpayGateway implements PaymentGateway {
       });
       planId = plan.id;
     }
-    if (!input.totalCount) {
-      throw new PaymentError('VALIDATION', 'Razorpay subscriptions require totalCount (number of billing cycles).', {
+    // Razorpay: "total_count or end_at must be supplied".
+    if (!input.totalCount && input.providerOptions?.end_at === undefined) {
+      throw new PaymentError('VALIDATION', 'Razorpay subscriptions need totalCount (billing cycles) or providerOptions.end_at (Unix time).', {
         provider: 'razorpay',
         hint: 'For "until cancelled" use a large count such as 120 monthly cycles.',
       });
     }
     const { data } = await this.call<{ id: string; status: string; short_url?: string }>('POST', '/subscriptions', 'create_subscription', {
       plan_id: planId,
-      total_count: input.totalCount,
+      ...(input.totalCount ? { total_count: input.totalCount } : {}),
       customer_notify: true,
       // customer_id is not a create-subscription parameter (Razorpay fills it in after authorisation);
       // keep the caller's customer id in notes so it can be correlated later.

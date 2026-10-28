@@ -159,13 +159,14 @@ function toMetaInfo(metadata: Record<string, string> | undefined): Record<string
     if (/^udf([1-9]|1[0-5])$/.test(k)) out[k] = v;
     else rest.push(v);
   }
-  for (let i = 1; i <= 5 && rest.length > 0; i++) {
+  // Free-form values fill udf1..udf10 (256 chars, any text); udf11-15 have a charset rule, so only explicit keys go there.
+  for (let i = 1; i <= 10 && rest.length > 0; i++) {
     if (!(`udf${i}` in out)) out[`udf${i}`] = rest.shift()!;
   }
   if (rest.length > 0) {
-    throw new PaymentError('VALIDATION', 'PhonePe metaInfo holds at most 5 free-form values (udf1..udf5).', {
+    throw new PaymentError('VALIDATION', 'PhonePe metaInfo holds at most 10 free-form values (udf1..udf10).', {
       provider: 'phonepe',
-      hint: 'Name keys udf1..udf5 explicitly, or pack several values into one.',
+      hint: 'Name keys udf1..udf15 explicitly, or pack several values into one.',
     });
   }
   // Initiate Payment reference: udf1-10 max 256 chars, no charset rule; udf11-15 max 50 chars of

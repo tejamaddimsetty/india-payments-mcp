@@ -43,6 +43,8 @@ const invoice = (over: Record<string, unknown> = {}) => ({
   currency_code: 'USD',
   total: 1200,
   balance: 1200,
+  payment_made: 0,
+  write_off_amount: 0,
   has_attachment: false,
   invoice_url: 'https://books.zoho.in/SecurePayment?CInvoiceID=abc',
   ...over,
@@ -132,11 +134,11 @@ describe('skydo ledger mode (receiving accounts)', () => {
     const { gw } = ledgerGateway();
     await gw.createPayment({ orderRef: 'ord_l_3', amount: 100000, currency: 'USD' });
     await gw.createPayment({ orderRef: 'ord_l_4', amount: 50000, currency: 'USD' });
-    const partial = await gw.recordPayment({ orderRef: 'ord_l_3', amountReceived: 99000, note: 'intermediary bank fee' });
+    const partial = await gw.recordPayment({ orderRef: 'ord_l_3', receiptId: 'SKY-1', amountReceived: 99000, note: 'intermediary bank fee' });
     expect(partial).toMatchObject({ status: 'pending' });
     expect(partial.failureReason).toContain('990.00 of 1000.00');
     expect(gw.outstanding().map((e: { orderRef: string }) => e.orderRef)).toEqual(['ord_l_3', 'ord_l_4']);
-    const full = await gw.recordPayment({ orderRef: 'ord_l_3', amountReceived: 1000, firaNumber: 'FIRA-123' });
+    const full = await gw.recordPayment({ orderRef: 'ord_l_3', receiptId: 'SKY-2', amountReceived: 1000, firaNumber: 'FIRA-123' });
     expect(full.status).toBe('captured');
     expect((full.raw as { receipts: unknown[] }).receipts).toHaveLength(2);
     expect(gw.outstanding().map((e: { orderRef: string }) => e.orderRef)).toEqual(['ord_l_4']);
@@ -144,10 +146,10 @@ describe('skydo ledger mode (receiving accounts)', () => {
 
   it('rejects bad receipts', async () => {
     const { gw } = ledgerGateway();
-    await expect(gw.recordPayment({ orderRef: 'nope_1', amountReceived: 100 })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(gw.recordPayment({ orderRef: 'nope_1', receiptId: 'R1', amountReceived: 100 })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await gw.createPayment({ orderRef: 'ord_l_5', amount: 100000, currency: 'USD' });
-    await expect(gw.recordPayment({ orderRef: 'ord_l_5', amountReceived: 10.5 })).rejects.toMatchObject({ code: 'VALIDATION' });
-    await expect(gw.recordPayment({ orderRef: 'ord_l_5', amountReceived: 0 })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.recordPayment({ orderRef: 'ord_l_5', receiptId: 'R1', amountReceived: 10.5 })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.recordPayment({ orderRef: 'ord_l_5', receiptId: 'R1', amountReceived: 0 })).rejects.toMatchObject({ code: 'VALIDATION' });
   });
 
   it('persists the ledger to disk and survives a restart', async () => {
@@ -155,7 +157,7 @@ describe('skydo ledger mode (receiving accounts)', () => {
     const f = fakeFetch([]);
     const first = skydo.create({ receivingAccounts: ACCOUNTS, ledgerFile: file }, testContext('skydo', f.fetch)) as any;
     await first.createPayment({ orderRef: 'ord_l_6', amount: 100000, currency: 'USD' });
-    await first.recordPayment({ orderRef: 'ord_l_6', amountReceived: 100000 });
+    await first.recordPayment({ orderRef: 'ord_l_6', receiptId: 'R6', amountReceived: 100000 });
     const second = skydo.create({ receivingAccounts: ACCOUNTS, ledgerFile: file }, testContext('skydo', f.fetch));
     expect((await second.getPaymentStatus({ orderRef: 'ord_l_6' })).status).toBe('captured');
     const onDisk = JSON.parse(readFileSync(file, 'utf8'));
@@ -174,7 +176,7 @@ describe('skydo ledger mode (receiving accounts)', () => {
     const { gw } = ledgerGateway();
     await gw.createPayment({ orderRef: 'ord_l_7', amount: 100000, currency: 'USD' });
     expect(await gw.verifyPayment({ orderRef: 'ord_l_7', expectedAmount: 100000, payload: {} })).toMatchObject({ valid: true, status: 'created', verifiedVia: 'manual_record' });
-    await gw.recordPayment({ orderRef: 'ord_l_7', amountReceived: 100000 });
+    await gw.recordPayment({ orderRef: 'ord_l_7', receiptId: 'R7', amountReceived: 100000 });
     expect(await gw.verifyPayment({ orderRef: 'ord_l_7', expectedAmount: 100000, payload: {} })).toMatchObject({ valid: true, status: 'captured' });
     expect((await gw.verifyPayment({ orderRef: 'ord_l_7', expectedAmount: 1, payload: {} })).valid).toBe(false);
   });
@@ -188,7 +190,7 @@ describe('skydo ledger mode (receiving accounts)', () => {
 describe('skydo Zoho Books bridge', () => {
   const createRoutes = (over: { contacts?: unknown[]; existing?: unknown[]; created?: Record<string, unknown> } = {}): FakeRoute[] => [
     { match: /GET https:\/\/www\.zohoapis\.in\/books\/v3\/invoices\?/, body: { code: 0, message: 'success', invoices: over.existing ?? [] } },
-    { match: /GET https:\/\/www\.zohoapis\.in\/books\/v3\/contacts\?/, body: { code: 0, message: 'success', contacts: over.contacts ?? [{ contact_id: '460000000011', contact_name: 'Globex', currency_code: 'USD', status: 'active' }] } },
+    { match: /GET https:\/\/www\.zohoapis\.in\/books\/v3\/contacts\?/, body: { code: 0, message: 'success', contacts: over.contacts ?? [{ contact_id: '460000000011', contact_name: 'Globex', currency_code: 'USD', status: 'active', email: 'ap@globex.com' }] } },
     { match: /POST https:\/\/www\.zohoapis\.in\/books\/v3\/invoices\/460000000099\/status\/sent\?/, body: { code: 0, message: 'Invoice status has been changed to Sent.' } },
     { match: /POST https:\/\/www\.zohoapis\.in\/books\/v3\/invoices\?/, status: 201, body: { code: 0, message: 'The invoice has been created.', invoice: invoice(over.created) } },
   ];
@@ -201,7 +203,7 @@ describe('skydo Zoho Books bridge', () => {
     expect(requests[0]!.url).toBe('https://accounts.zoho.in/oauth/v2/token');
     expect(Object.fromEntries(new URLSearchParams(requests[0]!.body!))).toEqual({ refresh_token: '1000.refresh', client_id: '1000.CLIENT', client_secret: 'zsecret', grant_type: 'refresh_token' });
     // 2. idempotency lookup by reference_number, 3. contact by email
-    expect(requests[1]!.url).toBe('https://www.zohoapis.in/books/v3/invoices?organization_id=60012345&reference_number=ord_skydo_1');
+    expect(requests[1]!.url).toBe('https://www.zohoapis.in/books/v3/invoices?organization_id=60012345&reference_number=ord_skydo_1&per_page=200&page=1');
     expect(requests[2]!.url).toBe('https://www.zohoapis.in/books/v3/contacts?organization_id=60012345&email=ap%40globex.com&contact_type=customer');
     expect(requests[1]!.headers.authorization).toBe('Zoho-oauthtoken 1000.access');
     // 4. create invoice: required customer_id + line_items[].item_id
@@ -213,9 +215,10 @@ describe('skydo Zoho Books bridge', () => {
       line_items: [{ item_id: '4600000000001', name: 'March retainer', rate: 1200, quantity: 1 }],
     });
     expect(body.notes).toContain('ACH routing: 026073150');
-    // 5. draft -> sent so Skydo sees an outstanding receivable
-    expect(requests[4]!.url).toBe('https://www.zohoapis.in/books/v3/invoices/460000000099/status/sent?organization_id=60012345');
-    expect(requests).toHaveLength(5);
+    // 5. race check for a twin invoice with the same reference, 6. draft -> sent so Skydo sees a receivable
+    expect(requests[4]!.url).toContain('/books/v3/invoices?organization_id=60012345&reference_number=ord_skydo_1&per_page=200');
+    expect(requests[5]!.url).toBe('https://www.zohoapis.in/books/v3/invoices/460000000099/status/sent?organization_id=60012345');
+    expect(requests).toHaveLength(6);
 
     expect(r).toMatchObject({ providerOrderId: '460000000099', status: 'created', amount: 120000, currency: 'USD' });
     expect(r.checkout).toMatchObject({ type: 'manual', url: 'https://books.zoho.in/SecurePayment?CInvoiceID=abc' });
@@ -247,14 +250,14 @@ describe('skydo Zoho Books bridge', () => {
   it('requires a Zoho customer in the invoice currency', async () => {
     const none = zohoGateway(createRoutes({ contacts: [] })).gw;
     await expect(none.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'x@y.com' } })).rejects.toThrow(/No Zoho Books customer/);
-    const eur = zohoGateway(createRoutes({ contacts: [{ contact_id: '1', contact_name: 'Globex', currency_code: 'EUR' }] })).gw;
+    const eur = zohoGateway(createRoutes({ contacts: [{ contact_id: '1', contact_name: 'Globex', currency_code: 'EUR', email: 'ap@globex.com' }] })).gw;
     await expect(eur.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } })).rejects.toThrow(/billed in EUR/);
     const noEmail = zohoGateway(createRoutes()).gw;
     await expect(noEmail.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD' })).rejects.toThrow(/customer.email/);
   });
 
   it('reads status from Zoho: paid with FIRA attached -> captured', async () => {
-    const { gw } = zohoGateway([{ match: '/books/v3/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ status: 'paid', balance: 0, has_attachment: true }) } }]);
+    const { gw } = zohoGateway([{ match: '/books/v3/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ status: 'paid', balance: 0, payment_made: 1200, has_attachment: true }) } }]);
     const s = await gw.getPaymentStatus({ orderRef: 'ord_skydo_1', providerOrderId: '460000000099' });
     expect(s).toMatchObject({ status: 'captured', amount: 120000, currency: 'USD' });
     expect((s.raw as { firaAttached: boolean }).firaAttached).toBe(true);
@@ -282,7 +285,7 @@ describe('skydo Zoho Books bridge', () => {
       if (url.includes('oauth/v2/token')) return new Response(JSON.stringify({ access_token: `tok${++calls}`, expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
       const auth = (init?.headers as Record<string, string>).Authorization;
       if (auth === 'Zoho-oauthtoken tok1') return new Response(JSON.stringify({ code: 57, message: 'You are not authorized to perform this operation' }), { status: 401, headers: { 'content-type': 'application/json' } });
-      return new Response(JSON.stringify({ code: 0, message: 'success', invoice: invoice({ status: 'paid' }) }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ code: 0, message: 'success', invoice: invoice({ status: 'paid', payment_made: 1200, balance: 0 }) }), { status: 200, headers: { 'content-type': 'application/json' } });
     };
     void f;
     const gw = skydo.create({ ...ZOHO, ledgerFile: tempLedger() }, testContext('skydo', fetch, { extractError: skydo.extractError }));
@@ -299,7 +302,7 @@ describe('skydo Zoho Books bridge', () => {
   it('surfaces Zoho business errors with their code and message', async () => {
     const { gw } = zohoGateway([
       { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [] } },
-      { match: /GET .*\/contacts\?/, body: { code: 0, message: 'success', contacts: [{ contact_id: '1', contact_name: 'G', currency_code: 'USD' }] } },
+      { match: /GET .*\/contacts\?/, body: { code: 0, message: 'success', contacts: [{ contact_id: '1', contact_name: 'G', currency_code: 'USD', email: 'ap@globex.com' }] } },
       { match: /POST .*\/invoices\?/, status: 400, body: { code: 1001, message: 'Invalid value passed for item_id' } },
     ]);
     const err = await gw.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } }).catch((e) => e);
@@ -309,7 +312,7 @@ describe('skydo Zoho Books bridge', () => {
   it('uses the api_domain Zoho returns with the token', async () => {
     const f = fakeFetch([
       { match: 'oauth/v2/token', body: { access_token: 't', expires_in: 3600, api_domain: 'https://www.zohoapis.com' } },
-      { match: 'https://www.zohoapis.com/books/v3/invoices/9?', body: { code: 0, message: 'success', invoice: invoice({ status: 'sent' }) } },
+      { match: 'https://www.zohoapis.com/books/v3/invoices/9?', body: { code: 0, message: 'success', invoice: invoice({ invoice_id: '9', status: 'sent' }) } },
     ]);
     const gw = skydo.create({ ...ZOHO, zohoDataCenter: 'com', ledgerFile: tempLedger() }, testContext('skydo', f.fetch));
     await gw.getPaymentStatus({ orderRef: 'ord_skydo_1', providerOrderId: '9' });
@@ -333,7 +336,7 @@ describe('skydo through PaymentsClient and MCP', () => {
   });
 
   it('full ledger flow over MCP: create -> outstanding -> record -> verify paid', async () => {
-    const env = { PAYMENTS_MODE: 'live', SKYDO_RECEIVING_ACCOUNTS: ACCOUNTS, SKYDO_LEDGER_FILE: tempLedger() };
+    const env = { PAYMENTS_MODE: 'live', PAYMENTS_ALLOW_LIVE_MUTATIONS: 'true', SKYDO_RECEIVING_ACCOUNTS: ACCOUNTS, SKYDO_LEDGER_FILE: tempLedger() };
     const server = createMcpServer(new PaymentsClient({ env, logger: silentLogger, guardLiveMutations: true }));
     const [a, b] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 't', version: '0' });
@@ -348,11 +351,214 @@ describe('skydo through PaymentsClient and MCP', () => {
     expect(created.data.checkout.instructions).toContain('Sort code: 04-00-75');
     expect((await call('payments_skydo_outstanding', {})).data.outstanding.map((e: { orderRef: string }) => e.orderRef)).toEqual(['ord_m_1']);
     expect((await call('payments_verify_payment', { provider: 'skydo', payload: {}, order_ref: 'ord_m_1', expected_amount: 250000 })).data.paid).toBe(false);
-    const rec = await call('payments_skydo_record_payment', { order_ref: 'ord_m_1', amount_received: 250000, fira_number: 'FIRA-9' });
+    const blocked = await call('payments_skydo_record_payment', { order_ref: 'ord_m_1', receipt_id: 'SKY-9', amount_received: 250000 });
+    expect(blocked).toMatchObject({ isError: true, data: { error: 'LIVE_MUTATION_BLOCKED' } });
+    const rec = await call('payments_skydo_record_payment', { order_ref: 'ord_m_1', receipt_id: 'SKY-9', amount_received: 250000, fira_number: 'FIRA-9', confirm: true });
     expect(rec.data.status).toBe('captured');
     expect((await call('payments_verify_payment', { provider: 'skydo', payload: {}, order_ref: 'ord_m_1', expected_amount: 250000 })).data).toMatchObject({ valid: true, paid: true, verifiedVia: 'manual_record' });
     expect((await call('payments_skydo_outstanding', {})).data.outstanding).toEqual([]);
     const refund = await call('payments_refund', { provider: 'skydo', order_ref: 'ord_m_1', refund_ref: 'rf_m_1', confirm: true });
     expect(refund.data.error).toBe('UNSUPPORTED');
+  });
+});
+
+describe('skydo round-2 regressions (strict review)', () => {
+  it('C1: two processes sharing one ledger file never lose each other\'s orders', async () => {
+    const file = tempLedger();
+    const f = fakeFetch([]);
+    const app = skydo.create({ receivingAccounts: ACCOUNTS, ledgerFile: file }, testContext('skydo', f.fetch)) as any;
+    const mcp = skydo.create({ receivingAccounts: ACCOUNTS, ledgerFile: file }, testContext('skydo', f.fetch)) as any; // started BEFORE the order exists
+    await app.createPayment({ orderRef: 'ord_shared_1', amount: 100000, currency: 'USD' });
+    await mcp.createPayment({ orderRef: 'ord_shared_2', amount: 60000, currency: 'USD' });
+    // The MCP process sees the app's order and its write keeps it.
+    expect((await mcp.recordPayment({ orderRef: 'ord_shared_1', receiptId: 'SKY-A', amountReceived: 100000 })).status).toBe('captured');
+    await app.createPayment({ orderRef: 'ord_shared_3', amount: 70000, currency: 'USD' });
+    const onDisk = JSON.parse(readFileSync(file, 'utf8')).entries.map((e: { orderRef: string }) => e.orderRef).sort();
+    expect(onDisk).toEqual(['ord_shared_1', 'ord_shared_2', 'ord_shared_3']);
+    expect((await app.getPaymentStatus({ orderRef: 'ord_shared_1' })).status).toBe('captured');
+  });
+
+  it('C1: a stale lock left by a crashed process is broken; a live lock is respected', async () => {
+    const file = tempLedger();
+    const f = fakeFetch([]);
+    writeFileSync(`${file}.lock`, '');
+    const { utimesSync } = await import('node:fs');
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${file}.lock`, old, old);
+    const gw = skydo.create({ receivingAccounts: ACCOUNTS, ledgerFile: file }, testContext('skydo', f.fetch));
+    await expect(gw.createPayment({ orderRef: 'ord_lock_1', amount: 100000, currency: 'USD' })).resolves.toMatchObject({ status: 'created' });
+  });
+
+  it('H1: a Zoho invoice written off as bad debt is NOT paid', async () => {
+    const { gw } = zohoGateway([{ match: '/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ status: 'paid', balance: 0, payment_made: 0, write_off_amount: 1200 }) } }]);
+    const s = await gw.getPaymentStatus({ orderRef: 'ord_skydo_1', providerOrderId: '460000000099' });
+    expect(s.status).toBe('failed');
+    expect(s.failureReason).toMatch(/written off/);
+  });
+
+  it('H1: a Zoho invoice closed with credit notes is NOT captured', async () => {
+    const { gw } = zohoGateway([{ match: '/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ status: 'paid', balance: 0, payment_made: 200, credits_applied: 1000 }) } }]);
+    expect((await gw.getPaymentStatus({ orderRef: 'ord_skydo_1', providerOrderId: '460000000099' })).status).toBe('unknown');
+  });
+
+  it('H1: paid=true through the client only when money covers the total', async () => {
+    const make = (inv: Record<string, unknown>) =>
+      new PaymentsClient({
+        env: { PAYMENTS_MODE: 'sandbox', ZOHO_DATA_CENTER: 'in', ZOHO_CLIENT_ID: 'c', ZOHO_CLIENT_SECRET: 's', ZOHO_REFRESH_TOKEN: 'r', ZOHO_ORGANIZATION_ID: '1', ZOHO_ITEM_ID: 'i', SKYDO_LEDGER_FILE: tempLedger() },
+        logger: silentLogger,
+        fetch: fakeFetch([TOKEN, { match: '/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice(inv) } }]).fetch,
+      });
+    const ok = await make({ status: 'paid', payment_made: 1200, balance: 0 }).verifyPayment('skydo', { orderRef: 'ord_skydo_1', providerOrderId: '460000000099', expectedAmount: 120000, payload: {} });
+    expect(ok.paid).toBe(true);
+    const writeOff = await make({ status: 'paid', payment_made: 0, write_off_amount: 1200, balance: 0 }).verifyPayment('skydo', { orderRef: 'ord_skydo_1', providerOrderId: '460000000099', expectedAmount: 120000, payload: {} });
+    expect(writeOff.paid).toBe(false);
+  });
+
+  it('H2: a providerOrderId for a different order is refused', async () => {
+    const { gw } = zohoGateway([{ match: '/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ reference_number: 'ord_OTHER', status: 'paid', payment_made: 1200 }) } }]);
+    await expect(gw.verifyPayment({ orderRef: 'ord_A', providerOrderId: '460000000099', expectedAmount: 120000, payload: {} })).rejects.toThrow(/reference ord_OTHER, not ord_A/);
+  });
+
+  it('H3: the same receipt recorded twice is counted once; a conflicting amount is rejected', async () => {
+    const { gw } = ledgerGateway();
+    await gw.createPayment({ orderRef: 'ord_dup_1', amount: 100000, currency: 'USD' });
+    expect((await gw.recordPayment({ orderRef: 'ord_dup_1', receiptId: 'SKY-77', amountReceived: 60000 })).status).toBe('pending');
+    expect((await gw.recordPayment({ orderRef: 'ord_dup_1', receiptId: 'SKY-77', amountReceived: 60000 })).status).toBe('pending');
+    await expect(gw.recordPayment({ orderRef: 'ord_dup_1', receiptId: 'SKY-77', amountReceived: 1 })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    await expect(gw.recordPayment({ orderRef: 'ord_dup_1', receiptId: ' ', amountReceived: 1 })).rejects.toThrow(/receiptId is required/);
+  });
+
+  it('H4: through the MCP server, recording a receipt in live mode needs the server flag AND confirm', async () => {
+    const env = { PAYMENTS_MODE: 'live', SKYDO_RECEIVING_ACCOUNTS: ACCOUNTS, SKYDO_LEDGER_FILE: tempLedger() };
+    const c = new PaymentsClient({ env, logger: silentLogger, guardLiveMutations: true });
+    await c.createPayment('skydo', { orderRef: 'ord_h4_1', amount: 100000, currency: 'USD' });
+    await expect(c.skydoRecordPayment({ orderRef: 'ord_h4_1', receiptId: 'R', amountReceived: 100000 }, { confirm: true })).rejects.toMatchObject({ code: 'LIVE_MUTATION_BLOCKED' });
+    // Your own app (no guard) can record receipts behind its own admin auth.
+    const app = new PaymentsClient({ env, logger: silentLogger });
+    expect((await app.skydoRecordPayment({ orderRef: 'ord_h4_1', receiptId: 'R', amountReceived: 100000 })).status).toBe('captured');
+  });
+
+  it('M1: a retry repairs an invoice left in draft by an earlier failure', async () => {
+    const { gw, requests } = zohoGateway([
+      { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [invoice({ status: 'draft' })] } },
+      { match: /status\/sent/, body: { code: 0, message: 'ok' } },
+    ]);
+    const r = await gw.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } });
+    expect(r.status).toBe('created');
+    expect(requests.filter((q) => q.url.includes('/status/sent'))).toHaveLength(1);
+  });
+
+  it('M4: a twin invoice created by a concurrent process is voided and the oldest is kept', async () => {
+    let lookups = 0;
+    const older = invoice({ invoice_id: '460000000050', status: 'sent', created_time: '2026-10-28T09:00:00+0530' });
+    const ours = invoice({ invoice_id: '460000000099', status: 'sent', created_time: '2026-10-28T09:00:05+0530' });
+    const f = fakeFetch([]);
+    const fetch = async (url: string, init?: RequestInit) => {
+      if (url.includes('oauth/v2/token')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (init?.method === 'GET' && url.includes('/invoices?')) {
+        lookups++;
+        return new Response(JSON.stringify({ code: 0, message: 'success', invoices: lookups === 1 ? [] : [ours, older] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (url.includes('/contacts?')) return new Response(JSON.stringify({ code: 0, message: 'success', contacts: [{ contact_id: '1', contact_name: 'G', currency_code: 'USD', email: 'ap@globex.com' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (url.includes('/status/void')) return new Response(JSON.stringify({ code: 0, message: 'voided' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ code: 0, message: 'created', invoice: ours }), { status: 201, headers: { 'content-type': 'application/json' } });
+    };
+    void f;
+    const voided: string[] = [];
+    const spy = async (url: string, init?: RequestInit) => {
+      if (url.includes('/status/void')) voided.push(url);
+      return fetch(url, init);
+    };
+    const gw = skydo.create({ ...ZOHO, ledgerFile: tempLedger() }, testContext('skydo', spy));
+    const r = await gw.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } });
+    expect(r.providerOrderId).toBe('460000000050');
+    expect(voided).toHaveLength(1);
+    expect(voided[0]).toContain('/invoices/460000000099/status/void');
+  });
+
+  it('M4: the reference lookup pages through results and ignores near-matches', async () => {
+    const page1 = { code: 0, message: 'success', invoices: [invoice({ reference_number: 'ord_skydo_10' })], page_context: { has_more_page: true } };
+    const page2 = { code: 0, message: 'success', invoices: [invoice({ invoice_id: '7', reference_number: 'ord_skydo_1', status: 'sent' })], page_context: { has_more_page: false } };
+    const { gw, requests } = zohoGateway([
+      { match: /page=1/, body: page1 },
+      { match: /page=2/, body: page2 },
+      { match: '/invoices/7?', body: { code: 0, message: 'success', invoice: invoice({ invoice_id: '7', status: 'sent' }) } },
+    ]);
+    expect((await gw.getPaymentStatus({ orderRef: 'ord_skydo_1' })).providerOrderId).toBe('7');
+    expect(requests.filter((q) => q.url.includes('per_page=200'))).toHaveLength(2);
+  });
+
+  it('M5: a voided invoice reports cancelled instead of NOT_FOUND, and its orderRef cannot be reused', async () => {
+    const voided = invoice({ status: 'void' });
+    const { gw } = zohoGateway([
+      { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [voided] } },
+      { match: '/invoices/460000000099?', body: { code: 0, message: 'success', invoice: voided } },
+    ]);
+    expect((await gw.getPaymentStatus({ orderRef: 'ord_skydo_1' })).status).toBe('cancelled');
+    await expect(gw.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } })).rejects.toThrow(/voided/);
+  });
+
+  it('M6: customer lookup re-checks the email and refuses to guess', async () => {
+    const two = zohoGateway([
+      { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [] } },
+      { match: /contacts/, body: { code: 0, message: 'success', contacts: [
+        { contact_id: '1', contact_name: 'A', currency_code: 'USD', email: 'ap@globex.com', status: 'active' },
+        { contact_id: '2', contact_name: 'B', currency_code: 'USD', email: 'AP@globex.com', status: 'active' },
+      ] } },
+    ]).gw;
+    await expect(two.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } })).rejects.toThrow(/2 active Zoho Books customers/);
+    const inactive = zohoGateway([
+      { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [] } },
+      { match: /contacts/, body: { code: 0, message: 'success', contacts: [{ contact_id: '1', contact_name: 'A', currency_code: 'USD', email: 'ap@globex.com', status: 'inactive' }] } },
+    ]).gw;
+    await expect(inactive.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } })).rejects.toThrow(/inactive/);
+    const other = zohoGateway([
+      { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [] } },
+      { match: /contacts/, body: { code: 0, message: 'success', contacts: [{ contact_id: '1', contact_name: 'A', currency_code: 'USD', email: 'someone@else.com', status: 'active' }] } },
+    ]).gw;
+    await expect(other.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } })).rejects.toThrow(/No Zoho Books customer/);
+  });
+
+  it('M2: with ZOHO_ACCOUNTS_URL the first call goes to the api_domain Zoho returned', async () => {
+    const f = fakeFetch([
+      { match: 'https://accounts.example-zoho.test/oauth/v2/token', body: { access_token: 't', expires_in: 3600, api_domain: 'https://www.zohoapis.in' } },
+      { match: 'https://www.zohoapis.in/books/v3/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ status: 'sent' }) } },
+    ]);
+    const gw = skydo.create({ ...ZOHO, zohoDataCenter: 'unlisted', zohoAccountsUrl: 'https://accounts.example-zoho.test', ledgerFile: tempLedger() }, testContext('skydo', f.fetch));
+    expect((await gw.getPaymentStatus({ orderRef: 'ord_skydo_1', providerOrderId: '460000000099' })).status).toBe('created');
+    expect(f.requests).toHaveLength(2);
+  });
+
+  it('M3: UAE, UK and Singapore Zoho regions are supported', () => {
+    const f = fakeFetch([]);
+    for (const dc of ['ae', 'uk', 'sg', 'ca']) expect(() => skydo.create({ ...ZOHO, zohoDataCenter: dc }, testContext('skydo', f.fetch))).not.toThrow();
+  });
+
+  it('L2/L3: bad dates and non-ISO currencies are rejected', async () => {
+    const { gw } = ledgerGateway();
+    await expect(gw.createPayment({ orderRef: 'ord_l3_1', amount: 100000, currency: 'dollars' })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await gw.createPayment({ orderRef: 'ord_l2_1', amount: 100000, currency: 'USD' });
+    await expect(gw.recordPayment({ orderRef: 'ord_l2_1', receiptId: 'R', amountReceived: 1, receivedAt: 'yesterday' })).rejects.toThrow(/not a date/);
+  });
+
+  it('L4: a rate-limited token refresh is reported as RATE_LIMITED, not as a revoked token', async () => {
+    const f = fakeFetch([{ match: 'oauth/v2/token', body: { error: 'Access Denied', error_description: 'You have made too many requests continuously. Please try again after some time.' } }]);
+    const gw = skydo.create({ ...ZOHO, ledgerFile: tempLedger() }, testContext('skydo', f.fetch));
+    await expect(gw.getPaymentStatus({ orderRef: 'ord_skydo_1', providerOrderId: '1' })).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+  });
+
+  it('L6: a corrupt ledger file does not block the Zoho bridge', () => {
+    const file = tempLedger();
+    writeFileSync(file, '{broken');
+    const f = fakeFetch([]);
+    expect(() => skydo.create({ ...ZOHO, ledgerFile: file }, testContext('skydo', f.fetch))).not.toThrow();
+  });
+
+  it('L1/L10: non-USD invoices carry the USD-50-equivalent note; long GBP references are flagged', async () => {
+    const { gw } = ledgerGateway();
+    const r = await gw.createPayment({ orderRef: 'ord_gbp_reference_long', amount: 100000, currency: 'GBP' });
+    const text = r.checkout.type === 'manual' ? r.checkout.instructions : '';
+    expect(text).toMatch(/equivalent of USD 50/);
+    expect(text).toMatch(/18 characters/);
   });
 });

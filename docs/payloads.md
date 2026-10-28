@@ -34,9 +34,14 @@ Every tool returns one text block containing pretty-printed JSON. Errors set `is
     {
       "id": "skydo",
       "name": "Skydo",
-      "summary": "Cross-border collections for Indian exporters, freelancers and agencies: ... No public API, so this project offers guidance only.",
+      "summary": "Cross-border collections for Indian exporters, freelancers and agencies: ... No public API, so this adapter automates Skydo's own supported paths: its native Zoho Books integration, or your receiving-account details plus a payment ledger.",
       "configured": true,
-      "features": { "createPayment": "unsupported", "verifyPayment": "unsupported", "...": "unsupported" }
+      "features": {
+        "createPayment": "partial", "verifyPayment": "partial", "paymentStatus": "partial",
+        "refund": "unsupported", "refundStatus": "unsupported", "webhooks": "unsupported",
+        "customers": "unsupported", "subscriptions": "unsupported", "settlements": "unsupported",
+        "payouts": "unsupported", "paymentLinks": "unsupported"
+      }
     }
   ]
 }
@@ -67,7 +72,7 @@ Every tool returns one text block containing pretty-printed JSON. Errors set `is
     { "env": "PHONEPE_WEBHOOK_PASSWORD", "key": "webhookPassword", "required": false, "secret": true, "description": "..." }
   ],
   "constraints": ["Minimum amount is 100 paise (Rs 1), for payments and refunds.", "..."],
-  "lastVerified": "2026-10-28"
+  "lastVerified": "2026-10-29"
 }
 ```
 
@@ -88,7 +93,7 @@ Every tool returns one text block containing pretty-printed JSON. Errors set `is
       "ready": true,
       "missing": [],
       "present": ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"],
-      "optionalMissing": ["RAZORPAY_WEBHOOK_SECRET"]
+      "optionalMissing": ["RAZORPAY_WEBHOOK_SECRET", "RAZORPAY_MERCHANT_NAME"]
     }
   ]
 }
@@ -100,6 +105,8 @@ When a live key is configured in sandbox mode, the same provider entry gains:
 { "initError": "PAYMENTS_MODE=sandbox but RAZORPAY_KEY_ID is a live key (rzp_live_). Refusing to move real money in sandbox mode." }
 ```
 
+For Skydo, every variable is optional (`ready` is always `true`); a missing or broken setup shows up as `initError`, for example `"Skydo needs SKYDO_RECEIVING_ACCOUNTS (your account details from the Skydo dashboard) and/or the ZOHO_* variables for the Zoho Books bridge."`
+
 ### `payments_recommend_gateway`
 
 ```json
@@ -109,7 +116,7 @@ When a live key is configured in sandbox mode, the same provider entry gains:
 ```json
 {
   "ranking": [
-    { "provider": "skydo", "name": "Skydo", "score": 16, "matches": ["exporter_collections", "international"], "blockers": [], "summary": "...", "constraints": ["No public developer API, SDK or webhooks. ...", "..."] },
+    { "provider": "skydo", "name": "Skydo", "score": 16, "matches": ["exporter_collections", "international"], "blockers": [], "summary": "...", "constraints": ["Skydo has no public API, SDK or webhooks, and its Terms (§25.8.12) forbid scraping/automating the dashboard. This adapter never contacts Skydo.", "..."] },
     { "provider": "stripe", "name": "Stripe (India)", "score": 5, "matches": ["international"], "blockers": [], "summary": "...", "constraints": ["Stripe services are invite-only in India ...", "..."] }
   ],
   "note": "Heuristic ranking from the capability map. Pricing, settlement time and KYC approval vary by business; confirm with the gateway before committing."
@@ -311,6 +318,7 @@ With `PAYMENTS_MODE=mock`, the result text is prefixed with `MOCK MODE: simulate
   "provider": "razorpay",
   "order_ref": "ORD_1001",
   "expected_amount": 49900,
+  "provider_order_id": "order_PbX4qJ7d2Kf9Lm",
   "payload": {
     "razorpay_payment_id": "pay_PbX5aQ1zZ8Yw3T",
     "razorpay_order_id": "order_PbX4qJ7d2Kf9Lm",
@@ -322,6 +330,7 @@ With `PAYMENTS_MODE=mock`, the result text is prefixed with `MOCK MODE: simulate
 ```json
 {
   "valid": true,
+  "paid": true,
   "status": "authorized",
   "orderRef": "ORD_1001",
   "providerOrderId": "order_PbX4qJ7d2Kf9Lm",
@@ -330,16 +339,16 @@ With `PAYMENTS_MODE=mock`, the result text is prefixed with `MOCK MODE: simulate
 }
 ```
 
-`authorized` is expected here: the signature proves authorisation, and auto-capture moves the payment to `captured`. Confirm capture through the `payment.captured` webhook or `payments_get_status`.
+`authorized` is expected here: the signature proves authorisation, and auto-capture moves the payment to `captured`. Confirm capture through the `payment.captured` webhook or `payments_get_status`. The signature is computed with `provider_order_id` (the id you stored at create time), never with the `razorpay_order_id` in the payload; without `provider_order_id` or `order_ref` the callback is rejected.
 
 ### Tampered or swapped payload
 
 ```json
-{ "valid": false, "status": "unknown", "verifiedVia": "signature", "reason": "Signature mismatch" }
+{ "valid": false, "paid": false, "status": "unknown", "verifiedVia": "signature", "reason": "Signature mismatch" }
 ```
 
 ```json
-{ "valid": false, "status": "unknown", "verifiedVia": "signature", "reason": "Order order_PbX4qJ7d2Kf9Lm belongs to receipt ORD_0999, not ORD_1001" }
+{ "valid": false, "paid": false, "status": "unknown", "verifiedVia": "signature", "reason": "Order order_PbX4qJ7d2Kf9Lm belongs to receipt ORD_0999, not ORD_1001" }
 ```
 
 ### PhonePe (status API)
@@ -351,6 +360,7 @@ With `PAYMENTS_MODE=mock`, the result text is prefixed with `MOCK MODE: simulate
 ```json
 {
   "valid": true,
+  "paid": true,
   "status": "captured",
   "orderRef": "ORD_1003",
   "providerOrderId": "OMO2510281530123456789",
@@ -360,7 +370,13 @@ With `PAYMENTS_MODE=mock`, the result text is prefixed with `MOCK MODE: simulate
 }
 ```
 
-`valid` means "authentic, and it matches your order and amount" on every gateway. It does not mean "paid": a genuine failure callback is `valid: true, status: "failed"`. `PaymentsClient` adds **`paid`** (`valid` and status `captured`/`authorized`/refunded). **Fulfil only when `paid` is true**, or after a `payment.succeeded` webhook or `payments_get_status` confirms capture. On Razorpay, `authorized` counts as paid; keep auto-capture enabled.
+`valid` means "authentic, and it matches your order and amount" on every gateway. It does not mean "paid": a genuine failure callback is `valid: true, paid: false, status: "failed"`. `PaymentsClient` adds **`paid`**, which is `true` only when all three hold:
+
+1. `valid` is `true`;
+2. the status is settled: `captured`, `authorized`, `refunded` or `partially_refunded`;
+3. the call was bound to your order: **both** `orderRef` and `expectedAmount` were passed. (The MCP tool requires both. In the SDK, if either is missing, `paid` is `false` and `reason` says "Pass orderRef and expectedAmount to get paid=true: an unbound callback could belong to a different order.")
+
+**Fulfil only when `paid` is true**, or after a `payment.succeeded` webhook or `payments_get_status` confirms capture. On Razorpay, `authorized` counts as paid; keep auto-capture enabled.
 
 ### CCAvenue (decryption)
 
@@ -369,8 +385,10 @@ With `PAYMENTS_MODE=mock`, the result text is prefixed with `MOCK MODE: simulate
 ```
 
 ```json
-{ "valid": true, "status": "captured", "orderRef": "ORD_1005", "providerOrderId": "ORD_1005", "providerPaymentId": "112233445566", "amount": 100000, "verifiedVia": "decryption" }
+{ "valid": true, "paid": true, "status": "captured", "orderRef": "ORD_1005", "providerOrderId": "ORD_1005", "providerPaymentId": "112233445566", "amount": 100000, "verifiedVia": "status_api" }
 ```
+
+Decryption is not authentication (with the classic cbc kit, AES-CBC has no MAC), so after a successful decryption `PaymentsClient` confirms the order with the status API and reports `verifiedVia: "status_api"`.
 
 ---
 
@@ -557,6 +575,123 @@ Sending the identical call again returns the identical result from the idempoten
 
 ---
 
+## Skydo
+
+Skydo has no API; see [skydo.md](skydo.md) for setup. Amounts are minor units of the invoice currency (cents for USD), and `currency` is required. `raw` is stripped as usual, except from `payments_skydo_record_payment`, which returns the ledger entry in `raw`.
+
+### `payments_create_payment`, ledger mode
+
+```json
+{ "provider": "skydo", "order_ref": "INV_2026_041", "amount": 125000, "currency": "USD", "customer": { "name": "Globex Corp", "email": "ap@globex.example" }, "description": "Design retainer, March 2026" }
+```
+
+```json
+{
+  "provider": "skydo",
+  "environment": "live",
+  "orderRef": "INV_2026_041",
+  "providerOrderId": "skydo:INV_2026_041",
+  "status": "created",
+  "amount": 125000,
+  "currency": "USD",
+  "checkout": {
+    "type": "manual",
+    "instructions": "Please pay USD 1250.00 by bank transfer to Acme Exports Pvt Ltd.\nPayment reference (include it in the transfer note): INV_2026_041\n\nUS account (ACH / Fedwire)\nAccount holder: Acme Exports Pvt Ltd\nAccount number: ...\nACH routing number: ...\n\nPayments are received through Skydo (skydo.com) and settled to India with a FIRA.\n\nWhen Skydo notifies you that the money arrived, record it (MCP: payments_skydo_record_payment; SDK: client.skydoRecordPayment)."
+  }
+}
+```
+
+### `payments_create_payment`, Zoho Books bridge
+
+Same arguments. Optional `provider_options`: `zohoCustomerId`, `sendEmail: true`, `dueDate` (`YYYY-MM-DD`), `exchangeRate`.
+
+```json
+{
+  "provider": "skydo",
+  "environment": "live",
+  "orderRef": "INV_2026_041",
+  "providerOrderId": "1234567000000098765",
+  "status": "created",
+  "amount": 125000,
+  "currency": "USD",
+  "checkout": {
+    "type": "manual",
+    "url": "https://books.zoho.in/...",
+    "instructions": "Zoho Books invoice INV-000041 is ready for USD 1250.00.\nSkydo imports it within about 10 minutes (Skydo dashboard > Connect Skydo to Zoho must be done once), then marks it paid in Zoho and attaches the FIRA when the money arrives.\nShare the invoice link with your client: https://books.zoho.in/..."
+  }
+}
+```
+
+### `payments_skydo_record_payment` (ledger mode)
+
+```json
+{ "order_ref": "INV_2026_041", "amount_received": 124000, "fira_number": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10" }
+```
+
+```json
+{
+  "provider": "skydo",
+  "orderRef": "INV_2026_041",
+  "providerOrderId": "skydo:INV_2026_041",
+  "status": "pending",
+  "amount": 125000,
+  "currency": "USD",
+  "method": "international_bank_transfer",
+  "failureReason": "Received USD 1240.00 of 1250.00.",
+  "raw": {
+    "orderRef": "INV_2026_041", "amount": 125000, "currency": "USD", "status": "pending", "amountReceived": 124000,
+    "createdAt": "2026-10-29T10:00:00.000Z", "updatedAt": "2026-11-03T09:30:00.000Z",
+    "customer": { "name": "Globex Corp", "email": "ap@globex.example" }, "description": "Design retainer, March 2026",
+    "receipts": [ { "amount": 124000, "receivedAt": "2026-11-03T09:30:00.000Z", "firaNumber": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10" } ]
+  }
+}
+```
+
+Recording a further `1000` moves it to `captured`. Each call adds a receipt, so do not record the same receipt twice.
+
+### `payments_skydo_outstanding`
+
+```json
+{}
+```
+
+```json
+{
+  "mode": "ledger",
+  "outstanding": [
+    { "orderRef": "INV_2026_041", "amount": 125000, "currency": "USD", "status": "pending", "amountReceived": 124000, "createdAt": "2026-10-29T10:00:00.000Z", "updatedAt": "2026-11-03T09:30:00.000Z", "receipts": ["..."] }
+  ]
+}
+```
+
+### `payments_verify_payment`
+
+```json
+{ "provider": "skydo", "order_ref": "INV_2026_041", "expected_amount": 125000, "payload": {} }
+```
+
+```json
+{ "valid": true, "paid": true, "status": "captured", "orderRef": "INV_2026_041", "providerOrderId": "skydo:INV_2026_041", "amount": 125000, "verifiedVia": "manual_record" }
+```
+
+With the Zoho bridge, `verifiedVia` is `"status_api"` and `providerOrderId` is the Zoho invoice id. Before the money arrives the same call returns `valid: true, paid: false, status: "created"` (or `"pending"` after a partial payment).
+
+### Skydo errors
+
+```json
+{ "error": "VALIDATION", "message": "Skydo receives foreign currency from abroad: pass the client's currency (USD, GBP, EUR, CAD, AUD, AED, SGD, ...). INR is not supported.", "retryable": false, "provider": "skydo" }
+```
+
+```json
+{ "error": "VALIDATION", "message": "Skydo's minimum payment is USD 50.00 (amount is in cents: 5000).", "retryable": false, "provider": "skydo" }
+```
+
+```json
+{ "error": "VALIDATION", "message": "With the Zoho Books bridge, Skydo marks invoices paid itself; nothing to record.", "retryable": false, "provider": "skydo" }
+```
+
+---
+
 ## `payments_generate_integration`
 
 ```json
@@ -574,15 +709,15 @@ All errors share this envelope. Keys whose value is `undefined` are omitted.
 ### `UNSUPPORTED`: the gateway doesn't offer the feature
 
 ```json
-{ "provider": "phonepe", "name": "Asha" }  // payments_create_customer
+{ "provider": "skydo", "order_ref": "INV_2026_041", "refund_ref": "RF_INV_2026_041" }  // payments_refund
 ```
 
 ```json
 {
   "error": "UNSUPPORTED",
-  "message": "phonepe does not support customers. PhonePe PG has no customer object; prefill a phone number via providerOptions.prefillUserLoginDetails.",
+  "message": "skydo does not support refund. Skydo has no developer API or webhooks (checked 2026-10-29; an API is on Skydo's roadmap since Dec 2025). Refunds to a foreign client are handled with Skydo support.",
   "retryable": false,
-  "provider": "phonepe",
+  "provider": "skydo",
   "hint": "Call payments_get_capabilities to see what this gateway supports, or choose another gateway."
 }
 ```
@@ -669,17 +804,32 @@ The same code is returned when a gateway answers HTTP 409.
 }
 ```
 
+A timeout on a request that is safe to retry (a GET, or a POST the gateway de-duplicates) is `TIMEOUT`, already retried up to `PAYMENTS_MAX_RETRIES` times:
+
 ```json
 {
   "error": "TIMEOUT",
-  "message": "razorpay create_order: request timed out",
+  "message": "razorpay fetch_order: request timed out",
   "retryable": true,
-  "provider": "razorpay",
-  "hint": "The request may or may not have reached the gateway. Check payment status before retrying."
+  "provider": "razorpay"
 }
 ```
 
-`retryable: true` on a create means **check status first**. See [reliability.md](reliability.md#playbook-timeout-on-create).
+### `OUTCOME_UNKNOWN`
+
+A request that is **not** safe to retry (for example Razorpay order creation, or a refund on a gateway that does not de-duplicate) timed out, lost its connection, or got a 5xx. It may or may not have happened, so it is never retried automatically:
+
+```json
+{
+  "error": "OUTCOME_UNKNOWN",
+  "message": "razorpay create_order: request timed out",
+  "retryable": false,
+  "provider": "razorpay",
+  "hint": "The request may or may not have been processed by the gateway. Look the payment/refund up with the status APIs before retrying."
+}
+```
+
+Look the payment up (`payments_get_status`) or the refund (`payments_get_refund_status`) before retrying. See [reliability.md](reliability.md#playbook-timeout-on-create).
 
 ### `CONFIG_MISSING`
 

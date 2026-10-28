@@ -8,17 +8,18 @@ Status labels: VERIFIED / PARTIAL / UNVERIFIED.
 - Registered Indian business only (sole prop / LLP / company); no individuals. PARTIAL https://stripe.com/docs/india-exports
 - Treat Stripe as an **international / exports** gateway, not the domestic-India default. If the user has no existing Stripe India account, recommend a domestic gateway and say why.
 - Shopify Payments (built on Stripe) is not available to India-based stores.
+- **Payment methods on an Indian Stripe account: cards.** UPI is not offered to India-domiciled accounts (IN is absent from the UPI "Business locations" list); it is for Stripe accounts outside India charging Indian customers. VERIFIED https://docs.stripe.com/payments/upi
 
 ## Auth, amounts
 
 - `https://api.stripe.com/v1`, `Authorization: Bearer sk_test_…|sk_live_…`, form-encoded bodies. Test vs live by key prefix. VERIFIED
 - Integer minor units (paise for INR). VERIFIED
-- Use the `Idempotency-Key` header on every POST (Stripe-native idempotency).
+- Use the `Idempotency-Key` header on every POST (Stripe-native idempotency; max 255 chars, expires after 24 h). Stripe replays the saved response for a reused key, including a 500: after a 5xx, check status before re-submitting with a new key. `client_reference_id` max 200 chars.
 - Pin `Stripe-Version`. From API `2026-09-30.endive`, failed India mandates come back as `inactive` with `inactive_reason`. VERIFIED
 
 ## Exports
 
-135+ presentment currencies on Visa/Mastercard; INR/USD on Amex. Non-INR needs extra onboarding info and transactions must be declared as exports (purpose codes, FIRC). PARTIAL. Customer name and billing address are required for export transactions (Stripe India docs). UNVERIFIED in this research.
+135+ presentment currencies on Visa/Mastercard; INR/USD on Amex. Non-INR needs extra onboarding info and transactions must be declared as exports (purpose codes, FIRC). PARTIAL. Each export charge needs a description of the goods/services and the customer's name and billing address: this project sends `payment_intent_data.description` and sets `billing_address_collection=required` on Checkout; for the PaymentIntent flow pass billing details into `stripe.confirmPayment`.
 
 ## Checkout flow
 
@@ -49,6 +50,8 @@ export function verifyStripeWebhook(rawBody: string, header: string, whsec: stri
 
 Prefer the official `stripe` library's `stripe.webhooks.constructEvent(rawBody, sig, whsec)` when available. Dedupe on `event.id`.
 
+Refund events: `charge.refunded` fires when a refund is created (it may still be pending, and `amount_refunded` is cumulative), so this project reports it as type `unknown`. Use `refund.updated` (succeeded -> `refund.processed`, failed -> `refund.failed`) and `refund.failed` for the outcome.
+
 ## Status mapping (PaymentIntent)
 
 | Stripe | Unified |
@@ -64,7 +67,7 @@ Refunds: `POST /v1/refunds {payment_intent, amount?}`; status `pending|succeeded
 
 ## RBI e-mandate rules for recurring (VERIFIED https://docs.stripe.com/india-recurring-payments)
 
-- Off-session India card/UPI payments need an e-mandate registered with AFA (3DS / UPI PIN).
+- Off-session Indian card (and UPI, on non-India accounts) payments need an e-mandate registered with AFA (3DS / UPI PIN).
 - Pre-debit notification ≥24h before each debit; Stripe delays card charges 26h (PaymentIntent in `processing`).
 - Each charge **> Rs 15,000 needs AFA**; UPI recurring > Rs 15,000 unsupported.
 - Mandates cannot be updated or cancelled via the API.

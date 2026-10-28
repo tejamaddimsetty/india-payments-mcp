@@ -18,6 +18,14 @@ Phases are ordered by what unblocks real production use first. Items move to the
 - [x] Integration code generator, gateway recommender
 - [x] Claude Skill, ChatGPT kit, examples, docs, CI
 
+## Phase 0.5: verification and Skydo (done, 0.2.0)
+
+- [x] Every adapter checked line by line against official docs; mismatches fixed (reports in `docs/research/verification/`)
+- [x] `paid` requires `orderRef` + `expectedAmount`; Razorpay signs with the stored `providerOrderId`
+- [x] CCAvenue AES-256-GCM kit (`CCAVENUE_ENCRYPTION=gcm`)
+- [x] Skydo: Zoho Books bridge and receiving accounts + ledger, `payments_skydo_record_payment`, `payments_skydo_outstanding` (19 tools)
+- [x] Sandbox smoke-test script (`npm run sandbox:smoke`) and stdio/HTTP end-to-end tests
+
 ## Phase 1: production hardening (next)
 
 - [ ] **Shared stores**: `RedisIdempotencyStore` (claim with `SET NX` before calling the gateway, which closes the in-process race), `RedisWebhookDedupeStore`, and Postgres equivalents. Ship as optional subpath exports so the core stays at two dependencies
@@ -27,8 +35,8 @@ Phases are ordered by what unblocks real production use first. Items move to the
 - [ ] **OpenTelemetry**: spans per gateway call (`provider`, `op`, `status`, `attempt`) and metrics (latency, error codes, retries, blocked mutations), via an optional `telemetry` hook on `PaymentsClient`
 - [ ] **Per-tool authorization for HTTP**: read-only vs mutating tokens, so an agent deployment can be structurally unable to refund
 - [ ] **Refund rate limits**: a per-order / per-day ceiling configurable on the client
-- [ ] Sandbox smoke-test workflow (manual dispatch, environment secrets) per gateway
-- [ ] CCAvenue: confirm the API version and field names with the official PDF. Implement refund status. Support the AES-256-GCM kit if confirmed
+- [ ] **Run every adapter against its live sandbox** and record the results (none has been run yet). Then a CI workflow for `sandbox:smoke` (manual dispatch, environment secrets) per gateway
+- [ ] CCAvenue: confirm the API version and field names with the official PDF, and whether DoWebTrans uses GCM for gcm-kit accounts. Implement refund status (`getRefundDetails`)
 
 ## Phase 2: money out and links
 
@@ -54,7 +62,8 @@ Phases are ordered by what unblocks real production use first. Items move to the
 ## Phase 5: reach
 
 - [ ] **Python SDK** (same types and capability JSON; generated from the TS capability maps to avoid drift)
-- [ ] Payment-link and invoice support for exporter flows (Skydo stays guidance-only until it publishes an API)
+- [ ] **Skydo API: switch when Skydo ships it.** Skydo announced developer APIs and webhooks in December 2025 with no date. When a public API exists, move create, status and refunds (if offered) to it and add webhook verification, keeping the Zoho Books bridge and ledger for existing users. Watch `developer.skydo.com` (an empty placeholder as of 2026-10-29) and Skydo's "What's new" blog
+- [ ] Skydo ledger mode: import Skydo's Reports-tab export to match receipts automatically instead of recording them by hand (the export format is undocumented; confirm with a real account first)
 - [ ] More frameworks in the code generator
 - [ ] Hosted docs site generated from capability maps
 - [ ] Additional gateways on request (for example Juspay/HyperCheckout, Easebuzz, Instamojo, BillDesk), subject to the same verification standard

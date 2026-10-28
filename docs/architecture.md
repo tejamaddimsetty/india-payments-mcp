@@ -18,14 +18,14 @@ This document covers deliverables A (overview), B (team responsibilities), D (un
   src/cli.ts        │ CLI: stdio (default) | http (/mcp, /healthz) | doctor             │
                     └───────────────────────────────┬───────────────────────────────────┘
                     ┌───────────────────────────────▼───────────────────────────────────┐
-  src/mcp/server.ts │ MCP server: 17 tools, 2 resources, 1 prompt. zod schemas,         │
+  src/mcp/server.ts │ MCP server: 19 tools, 2 resources, 1 prompt. zod schemas,         │
                     │ snake_case args -> camelCase SDK calls, `raw` stripped by default  │
                     └───────────────────────────────┬───────────────────────────────────┘
   Your app ───────────────────────────────────────► │  (SDK users call PaymentsClient directly)
                     ┌───────────────────────────────▼───────────────────────────────────┐
   src/client.ts     │ PaymentsClient (orchestrator)                                     │
                     │  validate (paise, orderRef regex) -> feature gate (capabilities)  │
-                    │  -> live-mutation rail -> idempotency -> audit -> adapter          │
+                    │  -> live rail (MCP only) -> idempotency -> audit -> adapter       │
                     └──────┬──────────────────────────┬───────────────────────────┬─────┘
                            │ mode=mock                │ mode=sandbox|live         │
                     ┌──────▼────────┐   ┌─────────────▼─────────────────────────┐ │
@@ -87,7 +87,7 @@ sequenceDiagram
 2. **Integer paise everywhere.** Adapters convert to the gateway's format: rupee strings for PayU/Paytm/CCAvenue, rupee numbers for Cashfree, paise for Razorpay/PhonePe/Stripe. `src/core/money.ts` has `toMajorString` and `fromMajor`.
 3. **`orderRef` is the merchant's key.** Adapters send it to the gateway (Razorpay `receipt` + `notes.order_ref`, Cashfree `order_id`, PhonePe `merchantOrderId`, ...) and map gateway ids back to it.
 4. **Four checkout shapes.** `js_sdk`, `redirect`, `form_post`, `manual`. A frontend that handles these four handles every gateway.
-5. **Verification is explicit about how it verified.** `verifiedVia` is one of `signature`, `status_api` or `decryption`. Gateways with unsigned redirects (PhonePe, Cashfree) are verified by calling the status API.
+5. **Verification is explicit about how it verified.** `verifiedVia` is one of `signature`, `status_api`, `decryption` or `manual_record`. Gateways with unsigned redirects (PhonePe, Cashfree, Stripe) are verified by calling the status API. CCAvenue's decrypted result is re-confirmed through the status API. Skydo has no callback: it reads the Zoho invoice (`status_api`) or the ledger entry you recorded (`manual_record`). `PaymentsClient` adds `paid`, which is true only when the result is valid, the status is settled, and the caller passed both `orderRef` and `expectedAmount`.
 6. **Nothing hidden.** Every result carries `raw` (the untouched gateway response). The MCP layer strips it by default to save agent context, and `include_raw: true` brings it back.
 7. **Mock mode is a first-class gateway.** It's not a stub. `MockGateway` keeps the real capability map, signs callbacks and webhooks with HMAC, tracks refund balances, and shares one `MockLedger` across tool calls.
 
@@ -129,7 +129,9 @@ Conventions for all tools:
 
   `retryable` is true only for `PROVIDER_UNAVAILABLE`, `NETWORK`, `TIMEOUT` and `RATE_LIMITED`. Schema violations (for example a malformed `order_ref`) are rejected by the MCP SDK's zod validation before reaching the client.
 
-Error codes: `CONFIG_MISSING`, `CONFIG_INVALID`, `VALIDATION`, `UNSUPPORTED`, `NOT_IMPLEMENTED`, `AUTH`, `PROVIDER_ERROR`, `PROVIDER_UNAVAILABLE`, `NETWORK`, `TIMEOUT`, `RATE_LIMITED`, `SIGNATURE_INVALID`, `LIVE_MUTATION_BLOCKED`, `IDEMPOTENCY_CONFLICT`, `NOT_FOUND`.
+Error codes: `CONFIG_MISSING`, `CONFIG_INVALID`, `VALIDATION`, `UNSUPPORTED`, `NOT_IMPLEMENTED`, `AUTH`, `PROVIDER_ERROR`, `PROVIDER_UNAVAILABLE`, `NETWORK`, `TIMEOUT`, `OUTCOME_UNKNOWN`, `RATE_LIMITED`, `SIGNATURE_INVALID`, `LIVE_MUTATION_BLOCKED`, `IDEMPOTENCY_CONFLICT`, `NOT_FOUND`.
+
+`OUTCOME_UNKNOWN` means a request that is not safe to retry (an order creation or refund POST the gateway does not de-duplicate) timed out, lost its connection, or got a 5xx: it may or may not have happened. Look the payment or refund up with the status tools before retrying.
 
 ### Discovery
 
@@ -146,8 +148,8 @@ Error codes: `CONFIG_MISSING`, `CONFIG_INVALID`, `VALIDATION`, `UNSUPPORTED`, `N
 
 | Tool | Args | Returns | Annotations |
 |---|---|---|---|
-| `payments_create_payment` | `provider`, `order_ref`, `amount` (paise), `currency?` (ISO 4217, default INR), `customer?: { id?, name?, email?, phone? }`, `description?` (≤255), `return_url?`, `notify_url?`, `metadata?: Record<string,string>`, `idempotency_key?` (≤64, default `order_ref`), `provider_options?: Record<string,unknown>` (merged into the gateway request), `include_raw?` | `CreatePaymentResult`: `{ provider, environment: "sandbox"\|"live", orderRef, providerOrderId, status, amount, currency, checkout: CheckoutAction, expiresAt?, raw? }` | idempotent, openWorld |
-| `payments_verify_payment` | `provider`, `payload: Record<string,string>` (callback fields exactly as received), `order_ref?` (strongly recommended), `expected_amount?`, `include_raw?` | `VerifyPaymentResult`: `{ valid, status, orderRef?, providerOrderId?, providerPaymentId?, amount?, reason?, verifiedVia: "signature"\|"status_api"\|"decryption", raw? }`. An invalid signature returns `valid: false` with a `reason`. It does not throw | readOnly, openWorld |
+| `payments_create_payment` | `provider`, `order_ref`, `amount` (paise; minor units of `currency`), `currency?` (ISO 4217, default INR; required for Skydo, which rejects INR), `customer?: { id?, name?, email?, phone? }`, `description?` (≤255), `return_url?`, `notify_url?`, `metadata?: Record<string,string>`, `idempotency_key?` (≤64, default `order_ref`), `provider_options?: Record<string,unknown>` (merged into the gateway request; keys that carry the amount, currency, order id, credentials, hashes or redirect URLs are rejected with `VALIDATION`), `include_raw?` | `CreatePaymentResult`: `{ provider, environment: "sandbox"\|"live", orderRef, providerOrderId, status, amount, currency, checkout: CheckoutAction, expiresAt?, raw? }` | idempotent, openWorld |
+| `payments_verify_payment` | `provider`, `payload: Record<string,string>` (callback fields exactly as received; `{}` for Skydo), `order_ref` (required), `expected_amount` (required), `provider_order_id?` (the id you stored from create; recommended, and used by Razorpay to compute the signature), `include_raw?` | `VerifyPaymentResult`: `{ valid, paid, status, orderRef?, providerOrderId?, providerPaymentId?, amount?, reason?, verifiedVia: "signature"\|"status_api"\|"decryption"\|"manual_record", raw? }`. An invalid signature returns `valid: false` with a `reason`. It does not throw. **Fulfil only when `paid` is `true`** | readOnly, openWorld |
 | `payments_get_status` | `provider`, `order_ref`, `provider_order_id?` (Razorpay requires it), `include_raw?` | `PaymentStatusResult`: `{ provider, orderRef, providerOrderId?, providerPaymentId?, status, amount?, amountRefunded?, currency?, method?, failureReason?, raw? }` | readOnly, openWorld |
 | `payments_refund` | `provider`, `order_ref`, `refund_ref`, `provider_payment_id?` (required by Razorpay, PayU, Paytm, CCAvenue, Stripe), `amount?` (omit = full), `reason?` (≤255), `speed?: "normal"\|"instant"`, `confirm?`, `include_raw?` | `RefundResult`: `{ provider, refundRef, providerRefundId?, status: "pending"\|"processed"\|"failed"\|"unknown", amount?, raw? }` | **destructive**, idempotent, openWorld |
 | `payments_get_refund_status` | `provider`, `refund_ref`, `order_ref?`, `provider_refund_id?`, `provider_payment_id?`, `include_raw?` | `RefundResult` | readOnly, openWorld |
@@ -158,7 +160,7 @@ Error codes: `CONFIG_MISSING`, `CONFIG_INVALID`, `VALIDATION`, `UNSUPPORTED`, `N
 { type: 'redirect'; url: string; method: 'GET' }
 { type: 'form_post'; url: string; fields: Record<string, string> }   // auto-submit an HTML form
 { type: 'js_sdk'; sdk: 'razorpay' | 'cashfree' | 'stripe' | 'paytm'; scriptUrl: string; options: Record<string, unknown> } // publishable values only
-{ type: 'manual'; instructions: string; url?: string }                // mock mode, Skydo-style guidance
+{ type: 'manual'; instructions: string; url?: string }                // mock mode; Skydo (transfer instructions, Zoho invoice url)
 ```
 
 `PaymentStatus` ∈ `created, pending, authorized, captured, failed, cancelled, expired, refunded, partially_refunded, unknown`. **`captured` means success.** `authorized` means the payment isn't final yet (manual-capture card flows, or a Razorpay signature verified before auto-capture runs).
@@ -187,6 +189,17 @@ Normalized `type` ∈ `payment.succeeded, payment.failed, payment.pending, payme
 |---|---|---|---|
 | `payments_generate_integration` | `provider`, `framework` ∈ `express, nextjs, fastify, react, html, react-native, flutter, shopify, other` (`FRAMEWORKS` in `src/codegen/index.ts`), `features?: ("checkout"\|"webhooks"\|"refunds"\|"subscriptions")[]` (default checkout + webhooks) | Generated files (paths + contents), env template and test checklist for the agent to write | readOnly |
 | `payments_mock_complete_payment` | `provider`, `order_ref`, `outcome: "success"\|"failure"`, `method?` (default `upi`) | `{ payment, callbackPayload }`. Feed `callbackPayload` to `payments_verify_payment`. Fails with `VALIDATION` outside mock mode or if the payment is already final | not readOnly |
+
+### Skydo
+
+Skydo has no API; see [skydo.md](skydo.md). These two tools work in `sandbox` and `live` mode only (mock mode returns `VALIDATION`; simulate Skydo with `payments_mock_complete_payment`).
+
+| Tool | Args | Returns | Annotations |
+|---|---|---|---|
+| `payments_skydo_record_payment` | `order_ref`, `amount_received` (positive integer, minor units of the invoice currency), `received_at?` (ISO date/time, default now), `fira_number?` (≤100), `note?` (≤500) | `PaymentStatusResult` for the ledger entry: `status` is `captured` once receipts reach the amount, else `pending`; `failureReason` shows received vs expected; `raw` is the ledger entry. Ledger mode only: `VALIDATION` with the Zoho bridge. Each call adds a receipt (not idempotent). Audited as `skydo_record_payment` | not readOnly, not idempotent |
+| `payments_skydo_outstanding` | none | `{ mode: "ledger"\|"zoho", outstanding: LedgerEntry[], note? }`: ledger entries with status `created` or `pending`, oldest first. In Zoho mode `outstanding` is empty and `note` points to Zoho Books | readOnly |
+
+SDK equivalents: `PaymentsClient.skydoRecordPayment({ orderRef, amountReceived, receivedAt?, firaNumber?, note? })` and `PaymentsClient.skydoOutstanding()`.
 
 ### Resources and prompts
 
@@ -229,7 +242,7 @@ export interface ProviderModule<C> {
 7. **Map statuses conservatively.** Return `unknown` rather than guess. Don't return `captured` unless the gateway says the money is collected.
 8. **Put the untouched gateway response in `raw`.**
 9. **`simulateWebhook` must round-trip:** `parseWebhook(await simulateWebhook(x))` succeeds with the configured secret.
-10. **Every fact in `capabilities.ts` traces to `docs/research/gateway-api-facts.md`** with a source and a VERIFIED / PARTIAL / UNVERIFIED tag.
+10. **Every fact in `capabilities.ts` traces to `docs/research/gateway-api-facts.md`** with a source and a VERIFIED / PARTIAL / UNVERIFIED tag, and is re-checked against the official docs in `docs/research/verification/`.
 
 ### How to add a provider
 
@@ -362,15 +375,18 @@ india-payments-mcp/
 │   │   └── money.ts             paise <-> major-unit conversion, validation
 │   ├── providers/
 │   │   ├── index.ts             Registry: PROVIDERS, allCapabilities()
-│   │   └── <id>/capabilities.ts, adapter.ts (+ helpers such as paytm/checksum.ts, stripe/form.ts)
+│   │   └── <id>/capabilities.ts, adapter.ts (+ helpers such as paytm/checksum.ts, stripe/form.ts,
+│   │                                skydo/zoho.ts, skydo/accounts.ts, skydo/ledger.ts)
 │   ├── mock/mock-gateway.ts     MockGateway + MockLedger
 │   ├── webhooks/handler.ts      createWebhookHandler, WebhookDedupeStore
 │   ├── mcp/server.ts            Tools, resources, prompts
 │   └── codegen/                 Integration generator, recommender, support matrix
-├── test/                        vitest suites, fakeFetch/testContext helpers
+├── test/                        vitest suites, fakeFetch/testContext helpers, stdio/HTTP end-to-end tests
+├── scripts/sandbox-smoke.ts     smoke test against real gateway sandboxes (npm run sandbox:smoke)
 ├── docs/
 │   ├── research/gateway-api-facts.md
-│   └── architecture, gateway-matrix, payloads, webhooks, security, testing,
+│   ├── research/verification/   line-by-line adapter checks against official docs, Skydo API search
+│   └── architecture, gateway-matrix, payloads, skydo, webhooks, security, testing,
 │       reliability, risks, roadmap, design-review
 ├── examples/                    express-checkout, mcp-clients
 ├── skills/india-payments/       Claude Skill

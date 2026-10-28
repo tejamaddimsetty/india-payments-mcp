@@ -47,8 +47,15 @@ const WEBHOOK_MAX_FUTURE_MS = 5 * 60 * 1000;
 const ORDER_ID_RE = /^[A-Za-z0-9_-]{3,45}$/;
 /** customer_details.customer_id: 3-50 chars, "Use alphanumeric values only" (Create Order reference). */
 const CUSTOMER_ID_RE = /^[A-Za-z0-9]{3,50}$/;
-/** refund_id: 3-40 chars, alphanumeric (Create Refund reference). */
-const REFUND_ID_RE = /^[A-Za-z0-9]{3,40}$/;
+// The reference text says "alphanumeric", but Cashfree's own examples use _ and - (REF-123, refund_00912).
+export function normalizeIndianPhone(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const compact = raw.replace(/[\s\-().]/g, '');
+  const m = /^(?:\+?91|0)?([6-9]\d{9})$/.exec(compact);
+  return m ? m[1] : compact;
+}
+
+const REFUND_ID_RE = /^[A-Za-z0-9_-]{3,40}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -229,7 +236,8 @@ class CashfreeGateway implements PaymentGateway {
         provider: 'cashfree',
       });
     }
-    const phone = input.customer?.phone?.replace(/[\s-]/g, '');
+    // Normalise Indian numbers to the 10-digit form (Cashfree rejects 91XXXXXXXXXX without a +).
+    const phone = normalizeIndianPhone(input.customer?.phone);
     if (!phone) {
       throw new PaymentError('VALIDATION', 'Cashfree requires customer.phone on every order.', {
         provider: 'cashfree',
@@ -382,9 +390,8 @@ class CashfreeGateway implements PaymentGateway {
 
   async refund(input: RefundInput): Promise<RefundResult> {
     if (!REFUND_ID_RE.test(input.refundRef)) {
-      throw new PaymentError('VALIDATION', `Cashfree refund_id (refundRef) must be 3-40 alphanumeric characters. Got "${input.refundRef}".`, {
+      throw new PaymentError('VALIDATION', `Cashfree refund_id (refundRef) must be 3-40 characters of letters, digits, "_" or "-". Got "${input.refundRef}".`, {
         provider: 'cashfree',
-        hint: 'Cashfree rejects "_", "-" and other symbols in refund_id. Use letters and digits only, e.g. "rf1001".',
       });
     }
     const path = this.orderPath(input.orderRef);
@@ -472,7 +479,8 @@ class CashfreeGateway implements PaymentGateway {
     const dispute = body.data?.dispute;
     const orderDetails = body.data?.order_details;
     // Documented on webhook versions 2025-01-01+: a hash unique per webhook payload, for dedupe.
-    const idempotencyHeader = getHeader(input.headers, 'x-idempotency-header');
+    // The overview page names x-idempotency-header; the 2025-01-01/2026-01-01 webhook samples send x-idempotency-key.
+    const idempotencyHeader = getHeader(input.headers, 'x-idempotency-header') ?? getHeader(input.headers, 'x-idempotency-key');
 
     let type: WebhookEventType;
     switch (body.type) {

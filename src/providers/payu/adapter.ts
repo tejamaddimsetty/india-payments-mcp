@@ -49,7 +49,23 @@ const MAX_REFUND_REF = 23;
  * (docs.payu.in/reference/addl_info-payment-apis) and the official Node SDK (payu-india/payu-sdk-node),
  * which throws for txnid > 25. Enforced as VALIDATION errors before the form is built.
  */
-export const PAYU_FIELD_LIMITS = { txnid: 25, productinfo: 100, firstname: 60, email: 50, udf: 255 } as const;
+export const PAYU_FIELD_LIMITS = {
+  txnid: 25,
+  productinfo: 100,
+  firstname: 60,
+  /** The same table lists firstname as 20 characters in the TEST environment. */
+  firstnameSandbox: 20,
+  email: 50,
+  udf: 255,
+  phone: 50,
+  lastname: 20,
+  address1: 100,
+  address2: 100,
+  city: 50,
+  state: 50,
+  country: 50,
+  zipcode: 20,
+} as const;
 /** The addl table lists 50 chars for surl/furl. That looks stale (real callback URLs are often longer), so we only warn. */
 export const PAYU_URL_SOFT_LIMIT = 50;
 
@@ -319,8 +335,9 @@ class PayuGateway implements PaymentGateway {
     };
     tooLong('txnid', PAYU_FIELD_LIMITS.txnid);
     tooLong('productinfo', PAYU_FIELD_LIMITS.productinfo);
-    tooLong('firstname', PAYU_FIELD_LIMITS.firstname);
+    tooLong('firstname', this.environment === 'sandbox' ? PAYU_FIELD_LIMITS.firstnameSandbox : PAYU_FIELD_LIMITS.firstname);
     tooLong('email', PAYU_FIELD_LIMITS.email);
+    for (const k of ['phone', 'lastname', 'address1', 'address2', 'city', 'state', 'country', 'zipcode'] as const) tooLong(k, PAYU_FIELD_LIMITS[k]);
     UDF_KEYS.forEach((k) => tooLong(k, PAYU_FIELD_LIMITS.udf));
     for (const k of ['surl', 'furl'] as const) {
       const len = fields[k]?.length ?? 0;
@@ -413,13 +430,16 @@ class PayuGateway implements PaymentGateway {
       amount = s.amount;
     }
     assertMinorUnits(amount);
-    // Not auto-retried: PayU's de-duplication on token_id is not documented.
+    // Not auto-retried: PayU rejects a reused token ("Token already exists", error 106) rather than
+    // returning the earlier refund, so a blind retry cannot tell success from duplicate.
     const { data } = await this.postservice<PayuRefundResponse | string>(
       'cancel_refund_transaction',
       [input.providerPaymentId, input.refundRef, toMajorString(amount)],
       'cancel_refund_transaction',
     );
-    if (typeof data !== 'object' || data.status !== 1) {
+    // Refund docs: "error_code value 102 should be treated as success" (102 = queued).
+    const accepted = typeof data === 'object' && (data.status === 1 || String(data.error_code ?? '') === '102');
+    if (!accepted) {
       const msg = typeof data === 'object' ? data.msg : String(data).slice(0, 200);
       throw new PaymentError('PROVIDER_ERROR', `PayU refund rejected${msg ? `: ${msg}` : ''}`, {
         provider: 'payu',

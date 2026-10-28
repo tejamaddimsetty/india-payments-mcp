@@ -21,17 +21,17 @@ Status labels: VERIFIED / PARTIAL / UNVERIFIED (test in sandbox).
 | Create order | `POST /pg/orders` `{order_id (3–45, [A-Za-z0-9_-]), order_amount, order_currency, customer_details:{customer_id, customer_phone, customer_email?, customer_name?}, order_meta?:{return_url, notify_url, payment_methods}, order_expiry_time?, order_note?, order_tags?}` → `{cf_order_id, order_id, order_status, payment_session_id}` | VERIFIED |
 | Order | `GET /pg/orders/{order_id}` | UNVERIFIED (standard) |
 | Order payments | `GET /pg/orders/{order_id}/payments` | UNVERIFIED (standard) |
-| Refund | `POST /pg/orders/{order_id}/refunds` `{refund_amount, refund_id (3–40), refund_speed?: STANDARD\|INSTANT, refund_note?}`. Only within **6 months** of payment | VERIFIED |
+| Refund | `POST /pg/orders/{order_id}/refunds` `{refund_amount, refund_id (3–40 **alphanumeric only**: `_` and `-` are rejected), refund_speed?: STANDARD\|INSTANT, refund_note?}`, header `x-idempotency-key` (UUID). Only within **6 months** of payment | VERIFIED |
 | Refund status | `GET /pg/orders/{order_id}/refunds/{refund_id}` | UNVERIFIED (standard) |
 | Subscriptions | `POST /pg/plans`, `POST /pg/subscriptions` (+ mandate APIs). Body differs across versions | PARTIAL |
-| Settlements | "Get All Settlements"; `GET /pg/orders/{order_id}/settlements` | PARTIAL |
-| Payouts | Separate product: `https://{sandbox\|api}.cashfree.com/payout` v2 | VERIFIED |
+| Settlements | "Get All Settlements" and "Get Settlements by Order ID" (path assumed `GET /pg/orders/{order_id}/settlements`) | UNVERIFIED path |
+| Payouts | Separate product: base `/payout` confirmed; separate credentials likely but not confirmed | PARTIAL |
 
-`customer_details.customer_phone` is mandatory.
+`customer_details.customer_phone` is mandatory. `customer_details.customer_id` is 3-50 **alphanumeric** characters (this project derives one from a hash of the phone if you pass none). `x-idempotency-key` must be a UUID: this project maps any other key deterministically to a UUID.
 
 ## Checkout flow
 
-1. Server: `POST /pg/orders` with `order_id = attemptRef`, `order_meta.return_url = https://yoursite/pay/return?order_id={order_id}`. Return `payment_session_id` to the client.
+1. Server: `POST /pg/orders` with `order_id = attemptRef`, `order_meta.return_url = https://yoursite/pay/return?order_id={order_id}` (this project appends `order_id={order_id}` when the URL lacks it; the placeholder is documented only in Cashfree's migration guide). Return `payment_session_id` to the client.
 2. Client: `<script src="https://sdk.cashfree.com/js/v3/cashfree.js">` or npm `@cashfreepayments/cashfree-js`, then `Cashfree({ mode: "sandbox" | "production" }).checkout({ paymentSessionId, redirectTarget: "_self" | "_blank" | "_top" | "_modal" })`. PARTIAL https://www.cashfree.com/docs/open-checkoutx
 3. Return URL carries only `order_id`, **no signature**. Server calls `GET /pg/orders/{order_id}` (and `/payments`), checks `order_status == "PAID"` and `order_amount` matches, then fulfils.
 4. Webhook also drives fulfilment.
@@ -44,16 +44,18 @@ Your domain must be whitelisted in the Cashfree dashboard or checkout will not o
 
 ```ts
 import { createHmac, timingSafeEqual } from 'node:crypto';
-export function verifyCashfreeWebhook(rawBody: string, timestamp: string, signature: string, clientSecret: string, maxAgeSec = 300) {
+export function verifyCashfreeWebhook(rawBody: string, timestamp: string, signature: string, clientSecret: string) {
   const expected = createHmac('sha256', clientSecret).update(timestamp + rawBody).digest('base64');
   const ok = expected.length === signature.length && timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
-  // Replay window. Timestamp is ms in current docs; UNVERIFIED, so accept seconds too.
+  // Cashfree documents no replay window and retries at 2/10/30 min, so a short window would reject
+  // genuine retries. This project accepts up to 24 h old / 5 min in the future and dedupes on the event id.
   const ts = Number(timestamp); const ms = ts > 1e12 ? ts : ts * 1000;
-  return ok && Math.abs(Date.now() - ms) <= maxAgeSec * 1000;
+  const age = Date.now() - ms;
+  return ok && age <= 24 * 3600_000 && age >= -5 * 60_000;
 }
 ```
 
-Webhook events seen in Cashfree docs: `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_FAILED_WEBHOOK`, `PAYMENT_USER_DROPPED_WEBHOOK`, refund webhooks. UNVERIFIED names; check your dashboard. Dedupe on `cf_payment_id` + event type if no event id is provided.
+Webhook events normalised by this project: `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_FAILED_WEBHOOK`, `PAYMENT_USER_DROPPED_WEBHOOK`, `REFUND_STATUS_WEBHOOK`, `AUTO_REFUND_STATUS_WEBHOOK` (refund object under `data.auto_refund`, not `data.refund`), `DISPUTE_CREATED` (dispute under `data.dispute`, order under `data.order_details`). `DISPUTE_UPDATED` / `DISPUTE_CLOSED` come through as type `unknown`. Dedupe on the `x-idempotency-header` value (webhook version 2025-01-01+); without it, on `cf_payment_id` + event type.
 
 ## Status mapping
 
@@ -64,14 +66,16 @@ Webhook events seen in Cashfree docs: `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_FAILED
 | order `EXPIRED` | `expired` |
 | order `TERMINATED` / `TERMINATION_REQUESTED` | `cancelled` UNVERIFIED |
 | payment `SUCCESS` / `FAILED` / `PENDING` / `USER_DROPPED` / `CANCELLED` / `NOT_ATTEMPTED` | `captured` / `failed` / `pending` / `failed` / `cancelled` / `created` UNVERIFIED |
-| refund `SUCCESS` / `PENDING` / `CANCELLED` / `ONHOLD` | `processed` / `pending` / `failed` / `pending` UNVERIFIED |
+| refund `SUCCESS` / `PENDING`, `ONHOLD`, `PENDING_APPROVAL` / `CANCELLED`, `REJECTED` | `processed` / `pending` / `failed` VERIFIED (documented enum) |
+| payment_group `upi*` / `cardless_emi` / `*card*` | `upi` / `cardless_emi` / `card` |
 
 ## Gotchas
 
 - Sending paise (`49900`) charges Rs 49,900. The most expensive bug possible with this gateway.
 - No signed return: always re-fetch.
 - Domain whitelist for JS checkout, separate for sandbox and production.
-- Refund window 6 months.
+- Refund window 6 months. `refund_id` is alphanumeric only: a refundRef with `_` or `-` is rejected.
+- Key-prefix checks (`TEST...`, `_test_`, `_prod_`) used by this project are a heuristic; Cashfree does not document key prefixes.
 - Pin `x-api-version`; don't copy samples written for another version.
 
 ## Sandbox test data (UNVERIFIED in this research)

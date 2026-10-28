@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-29
+
+### Added
+
+- **Skydo adapter** (previously guidance only). Skydo still has no public API, so the adapter never contacts Skydo; it automates the two paths Skydo supports. See [docs/skydo.md](docs/skydo.md).
+  - Zoho Books bridge (`ZOHO_DATA_CENTER`, `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_ORGANIZATION_ID`, `ZOHO_ITEM_ID`, optional `ZOHO_ACCOUNTS_URL`): creates a Zoho Books invoice per order (idempotent on `reference_number` = orderRef), marks drafts sent, and reads back the status that Skydo sets, including whether the FIRA is attached.
+  - Receiving accounts + ledger (`SKYDO_RECEIVING_ACCOUNTS`, `SKYDO_PAYEE_NAME`, `SKYDO_LEDGER_FILE`): bank-transfer instructions per currency (with a `"*"` fallback) and a persistent JSON ledger of expected payments.
+  - `createPayment`, `verifyPayment` and `paymentStatus` are now `partial` for Skydo. Refunds, webhooks, customers, subscriptions, settlements, payouts and payment links stay unsupported.
+  - Skydo rules enforced in `PaymentsClient` (and so in mock mode too): `currency` is required, INR is rejected, USD payments must be at least USD 50.
+- MCP tools `payments_skydo_record_payment` and `payments_skydo_outstanding` (19 tools in total), and SDK methods `PaymentsClient.skydoRecordPayment` and `skydoOutstanding`.
+- `verifiedVia: "manual_record"` for results read from the Skydo ledger.
+- `providerOrderId` on `verifyPayment` (MCP: `provider_order_id`): Razorpay now computes the signature with the `order_…` / `sub_…` id you stored, never the id the browser sends.
+- Credentials: `RAZORPAY_MERCHANT_NAME` (Checkout `name`, which Razorpay marks mandatory) and `CCAVENUE_ENCRYPTION` (`cbc` or `gcm`).
+- CCAvenue AES-256-GCM integration kit (`CCAVENUE_ENCRYPTION=gcm`, checkout at `gTransaction.do`).
+- Paytm refund notifications (Accept/Success Refund JSON) are verified and normalised, and `head.signature` on API responses is checked when present.
+- Integration code generator: a Skydo backend (invoice route, status refresh, Zoho polling, admin receipt route) instead of a guide only.
+- `npm run sandbox:smoke` (`scripts/sandbox-smoke.ts`): creates small unpaid orders against the real sandboxes of configured gateways.
+- End-to-end tests that start the MCP server as a child process and call it over stdio and Streamable HTTP.
+- Verification reports in `docs/research/verification/`: every adapter checked line by line against official docs, plus an exhaustive search for a Skydo API.
+
+### Changed
+
+- **`paid` now requires binding.** `verifyPayment` returns `paid: true` only when the result is valid, the status is settled, **and** the caller passed both `orderRef` and `expectedAmount`. Otherwise `reason` explains why. (The MCP tool already required both.)
+- Adapters corrected after verification against official docs:
+  - Razorpay: Checkout `name` is sent; daily plans need `interval >= 7`; `customer_id` is no longer sent on subscription create (kept in `notes.customer_id`); `cardless_emi` removed from payment methods.
+  - Stripe: Indian accounts list `card` only (UPI is not available to India-domiciled accounts); `charge.refunded` is reported as `unknown` (use `refund.updated` / `refund.failed`); Idempotency-Key and `client_reference_id` length limits are enforced.
+  - Cashfree: refund `x-idempotency-key` is a UUID derived from orderRef + refundRef; webhook timestamps up to 24 h old are accepted (Cashfree retries for 30+ minutes) with dedupe on the event id; auto-refund and dispute webhooks are normalised; `customer_id` derivation and refund status enum fixed.
+  - PayU: txnid max 25 characters and field limits enforced; refund status (`check_action_status`) is now `supported` and parses both documented response shapes.
+  - Paytm: refund apply and refund status use the `securegw(-stage).paytmpayments.in` hosts; wallet and pay-later payment methods added; payment-mode codes normalised.
+  - PhonePe: `metaInfo` udf limits validated; flat refund webhook samples handled; claims the docs do not make (refund de-duplication, order-id reuse) marked as assumptions.
+  - CCAvenue: `orderStatusTracker` version 1.2, `refundOrder` 1.1; `billing_country` sent as a country name.
+- Config values that look like template placeholders (`replace-me`, `xxxxxxxx`, `<...>`) are treated as unset, so `doctor` does not report them as configured.
+- `PHONEPE_CLIENT_VERSION` in `.env.example` is blank: use the value shown with your credentials.
+
+### Not yet done
+
+- No adapter has been run against a live gateway sandbox. See the verification status in the README.
+
 ## [0.1.0] - 2026-10-28
 
 ### Added

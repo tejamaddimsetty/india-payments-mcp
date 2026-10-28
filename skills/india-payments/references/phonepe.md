@@ -11,7 +11,7 @@ Status labels: VERIFIED / PARTIAL / UNVERIFIED.
   - `application/x-www-form-urlencoded`: `client_id, client_version, client_secret, grant_type=client_credentials` → `{access_token, issued_at, expires_at (epoch s), token_type:"O-Bearer"}`. VERIFIED
 - API calls: `Authorization: O-Bearer <access_token>`. Partners add `X-MERCHANT-ID`. VERIFIED
 - API base: sandbox `https://api-preprod.phonepe.com/apis/pg-sandbox`, prod `https://api.phonepe.com/apis/pg`. VERIFIED
-- Cache the token until `expires_at` minus a margin; refresh on 401. Sandbox `client_version` is typically `1`.
+- Cache the token until `expires_at` minus a margin; refresh on 401. Use the `client_version` shown in your dashboard (or shared by PhonePe for sandbox); the docs do not fix a value.
 - Webhook auth is separate: a username/password you set in the Business Dashboard (in sandbox, ask the PhonePe integration team).
 - Env (this project): `PHONEPE_CLIENT_ID`, `PHONEPE_CLIENT_SECRET`, `PHONEPE_CLIENT_VERSION`, `PHONEPE_WEBHOOK_USERNAME`, `PHONEPE_WEBHOOK_PASSWORD`.
 
@@ -23,14 +23,14 @@ Integer paise, **min 100** (payments and refunds). VERIFIED
 
 | Purpose | Call | Status |
 |---|---|---|
-| Create payment | `POST /checkout/v2/pay` `{merchantOrderId (≤63, letters/digits/_/-), amount, expireAfter? (300–3600 s), paymentFlow:{type:"PG_CHECKOUT", merchantUrls:{redirectUrl}}, metaInfo?:{udf1..udf15}, prefillUserLoginDetails?:{phoneNumber}, disablePaymentRetry?}` → `{orderId, state:"PENDING", expireAt, redirectUrl}` | VERIFIED |
+| Create payment | `POST /checkout/v2/pay` `{merchantOrderId (≤63, letters/digits/_/-), amount, expireAfter? (300–3600 s), paymentFlow:{type:"PG_CHECKOUT", merchantUrls:{redirectUrl}}, metaInfo?:{udf1..udf15}, prefillUserLoginDetails?:{phoneNumber}, disablePaymentRetry?}` → `{orderId, state:"PENDING", expireAt, redirectUrl}`. `metaInfo`: udf1..udf10 max 256 chars; udf11..udf15 max 50 chars of letters, digits and `_-+@.` (validated by this project) | VERIFIED |
 | Order status | `GET /checkout/v2/order/{merchantOrderId}/status?details=false&errorContext=true` → `state` ∈ `PENDING\|COMPLETED\|FAILED`, `paymentDetails[]` | VERIFIED |
-| Refund | `POST /payments/v2/refund` `{merchantRefundId (≤63), originalMerchantOrderId, amount}` → `state: PENDING` | VERIFIED |
+| Refund | `POST /payments/v2/refund` `{merchantRefundId (≤63), originalMerchantOrderId, amount}` → `state: PENDING`. That `merchantRefundId` de-duplicates retries is assumed, not documented | VERIFIED (call) / UNVERIFIED (de-dupe) |
 | Refund status | `GET /payments/v2/refund/{merchantRefundId}/status` → `PENDING\|COMPLETED\|FAILED` (custom-checkout docs also list `CONFIRMED`) | VERIFIED |
 | Autopay (UPI mandate, eNACH) | `/payment-gateway/autopay/` docs | PARTIAL |
 | Payment links, settlements | doc sections exist | PARTIAL |
 
-Reusing a `merchantOrderId` that has moved past CREATED returns `BAD_REQUEST`: one id per attempt.
+Use one `merchantOrderId` per attempt. Reuse behaviour is not documented; assume it is rejected. UNVERIFIED
 
 ## Checkout flow
 
@@ -56,7 +56,7 @@ export function verifyPhonePeWebhookAuth(authHeader: string | undefined, usernam
 
 HMAC method: the current webhook page also describes `x-phonepe-checksum-key-id` and `x-phonepe-checksum-signature`, but **algorithm and encoding are not stated**. Do not guess; use the SHA method + status re-fetch. PARTIAL/UNVERIFIED
 
-Events: `checkout.order.completed`, `checkout.order.failed`, `pg.refund.completed`, `pg.refund.failed`. Body `{event, payload:{state, orderId, merchantOrderId | originalMerchantOrderId, amount, paymentDetails}}`. Use `event` (old `type` field is deprecated) and `payload.state`. VERIFIED. Dedupe key: `event + merchantOrderId (+ merchantRefundId)`; no event id documented.
+Events: `checkout.order.completed`, `checkout.order.failed`, `pg.refund.completed`, `pg.refund.failed`. Body `{event, payload:{state, orderId, merchantOrderId | originalMerchantOrderId, amount, paymentDetails}}`. Use `event` (old `type` field is deprecated) and `payload.state`. VERIFIED. Some documented refund samples are flat (no `event`/`payload` wrapper, no merchantRefundId): read the top-level body and infer the event from `state`. Dedupe key: `event + merchantOrderId (+ merchantRefundId)`; no event id documented.
 
 ## Status mapping
 

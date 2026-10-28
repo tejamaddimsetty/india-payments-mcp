@@ -8,7 +8,7 @@ Status labels: VERIFIED = read on the official page; PARTIAL = partly confirmed;
 - Base URL `https://api.razorpay.com/v1` for both test and live. Mode is decided by the key pair: `rzp_test_…` vs `rzp_live_…`. VERIFIED
 - HTTP Basic `key_id:key_secret`. Partner (platform) calls add `X-Razorpay-Account: <merchant account id>`. VERIFIED
 - Secrets: `key_secret` (API + payment signature) and a **separate** per-webhook secret you type in Dashboard > Webhooks. They are not the same value. VERIFIED
-- Env (this project): `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`.
+- Env (this project): `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_MERCHANT_NAME` (optional: the Checkout option `name`, which Razorpay marks mandatory; falls back to "Payment").
 
 ## Amounts
 
@@ -34,9 +34,9 @@ Integer paise (smallest subunit): Rs 299 = `29900`. Min 100 paise. Zero-decimal 
 ## Checkout flow (Standard Checkout)
 
 1. Server: compute amount, `POST /v1/orders` with `receipt = attemptRef`. Store `order_id` on the attempt.
-2. Client: load `https://checkout.razorpay.com/v1/checkout.js`, `new Razorpay({ key: KEY_ID, order_id, amount, currency, name, prefill, handler }).open()`. VERIFIED
+2. Client: load `https://checkout.razorpay.com/v1/checkout.js`, `new Razorpay({ key: KEY_ID, order_id, amount, currency, name, prefill, handler }).open()`. `name` (your business name) is mandatory. VERIFIED
 3. `handler` receives `{razorpay_payment_id, razorpay_order_id, razorpay_signature}`. POST them to your server.
-4. Server verifies the signature using the **order_id from your DB**, not from the payload, then marks paid (idempotently).
+4. Server verifies the signature using the **order_id from your DB**, not from the payload ("Do not use the `razorpay_order_id` returned by Checkout"), then marks paid (idempotently). With this SDK/MCP pass `providerOrderId` (MCP: `provider_order_id`) = the stored `order_…` / `sub_…` id, plus `orderRef` and `expectedAmount`. Without `providerOrderId` or `orderRef` the callback is rejected.
 5. Webhook `payment.captured` / `order.paid` also marks paid. Whichever arrives first wins; the other is a no-op.
 
 ## Signatures
@@ -86,6 +86,9 @@ Common webhook events: `payment.authorized`, `payment.captured`, `payment.failed
 - Same host for test and live: a live key in a dev env charges real cards.
 - Instant refunds are `speed: "optimum"` (the unified API calls it `instant`); they can fall back to normal; read `speed_processed`.
 - Subscriptions need `total_count`. The first payment is the mandate authorisation via Checkout with `subscription_id`.
+- Daily plans need `interval >= 7` (enforced before the call).
+- `customer_id` is not a create-subscription parameter; Razorpay fills it after authorisation. This project keeps your customer id in `notes.customer_id`.
+- Payment `method` values on the payment entity: `upi`, `card`, `netbanking`, `wallet`, `emi`, `paylater`. `cardless_emi` is not in the documented enum.
 
 ## Sandbox test data (UNVERIFIED in this research: re-check the official pages)
 

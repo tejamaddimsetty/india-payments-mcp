@@ -15,7 +15,7 @@ Rupee decimal **string**, e.g. `"499.00"`. The exact same string must appear in 
 
 ## Checkout flow (hosted, form POST)
 
-1. Server: create attempt, `txnid = attemptRef` (unique per attempt). Build fields `key, txnid, amount, productinfo, firstname, email, phone, surl, furl, udf1..udf5, hash`. PARTIAL
+1. Server: create attempt, `txnid = attemptRef` (unique per attempt, **max 25 chars**). Build fields `key, txnid, amount, productinfo, firstname, email, phone, surl, furl, udf1..udf5, hash`. Limits (enforced by this project): productinfo 100, firstname 60, email 50, udf1..udf5 255. The docs also list 50 for surl/furl; that looks stale, so this project only logs a warning. VERIFIED https://docs.payu.in (additional parameters)
 2. Client: render an auto-submitting `<form method="POST" action="https://…/_payment">` with those fields. Nothing secret is in the form; the hash is.
 3. PayU POSTs back (form-urlencoded) to `surl` or `furl`. That route is a server POST endpoint, not a SPA page. Exempt it from CSRF.
 4. Server: verify the reverse hash, check `txnid` and `amount` match the stored attempt, then call `verify_payment` before fulfilling (PayU recommends this).
@@ -38,11 +38,13 @@ export function requestHash(f: Record<string, string>, salt: string) {
 
 // Response (reverse): SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key   VERIFIED
 // If the response has additional_charges, PREFIX "additional_charges|" before SALT.            VERIFIED
+// The webhook field table spells it additionalCharges: accept both.
 export function verifyResponse(r: Record<string, string>, salt: string) {
   const u = (k: string) => r[k] ?? '';
   let s = [salt, r.status, '', '', '', '', '', u('udf5'), u('udf4'), u('udf3'), u('udf2'), u('udf1'),
     r.email, r.firstname, r.productinfo, r.amount, r.txnid, r.key].join('|');
-  if (r.additional_charges) s = `${r.additional_charges}|${s}`;
+  const addl = r.additional_charges ?? r.additionalCharges;
+  if (addl) s = `${addl}|${s}`;
   return eq(sha512(s), (r.hash ?? '').toLowerCase());
 }
 
@@ -58,8 +60,8 @@ With split payments the response hash uses `status|splitInfo||||||` instead of `
 | Purpose | command | vars | Status |
 |---|---|---|---|
 | Verify / status | `verify_payment` | `var1=txnid` (pipe-separate several) → `{status:1\|0, msg, transaction_details:{<txnid>:{mihpayid, status, bank_ref_num, amt, mode, …}}}`; missing → `"Not Found"` | VERIFIED |
-| Refund | `cancel_refund_transaction` | `var1=mihpayid` (PayU id, **not** txnid), `var2=token_id` (your unique refund id, **max 23 chars**), `var3=amount`. Cancels if `auth`, refunds if `captured` | VERIFIED https://docs.payu.in/docs/refund-transaction-api |
-| Refund status | `check_action_status` (by request id), plus by-PayU-id and `getAllRefundsFromTxnIds` | command strings from community SDKs | PARTIAL https://docs.payu.in/reference/refund-apis |
+| Refund | `cancel_refund_transaction` | `var1=mihpayid` (PayU id, **not** txnid), `var2=token_id` (your unique refund id, **max 23 chars**), `var3=amount`. Cancels if `auth` (the id then comes back as `txn_update_id`), refunds if `captured` (`request_id`). Omitting the amount refunds the ORIGINAL amount: after a partial refund always pass the remaining amount | VERIFIED https://docs.payu.in/docs/refund-transaction-api |
+| Refund status | `check_action_status`, `var1=request_id`. Two documented response shapes: nested `transaction_details.{request_id}.{request_id}.{status, amt}` and flat `{refund_status, refund_amount}`. `QUEUED` / `REQUESTED` / `IN PROGRESS` / `processing` / `od_hit` = pending. The sample curl says `check_action_status_txnid`; confirm in sandbox | VERIFIED (docs + official PHP SDK `checkRefundStatus`) |
 
 ## Status mapping
 
@@ -77,7 +79,9 @@ With split payments the response hash uses `status|splitInfo||||||` instead of `
 - Amount string mismatch (`"499"` vs `"499.00"`) breaks the hash silently.
 - Reverse-hash field order is the reverse of the request and the 5 empties sit right after `status`, not after `udf5`.
 - surl/furl receive a cross-site POST: SameSite=Lax session cookies are not sent. Look the attempt up by `txnid`, not by session.
-- Webhook body format: docs disagree (JSON vs form-urlencoded). Accept both and verify the same reverse hash. PARTIAL
+- Webhook body format: docs disagree (JSON vs form-urlencoded). Accept both and verify the same reverse hash. PARTIAL. This project parses payment webhooks only; poll refund status instead of relying on refund webhooks.
+- `txnid` max 25 chars; nothing in the key tells test from live, so make sure `PAYMENTS_MODE` matches the key.
+- PayU de-duplication of refund ids is undocumented: on `OUTCOME_UNKNOWN`, check refund status before retrying.
 - Test-mode webhooks fire only for test transactions.
 - Subscriptions: Standing Instructions (`si=1`, `si_details`) and mandate APIs exist. UNVERIFIED
 

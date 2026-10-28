@@ -16,7 +16,7 @@ const SERVICE = `/**
  *  - Ledger mode (only SKYDO_RECEIVING_ACCOUNTS set): we hand the client your Skydo account details
  *    with the order reference; an admin records the receipt when Skydo notifies you.
  */
-import { createPaymentsClient, PaymentError, type PaymentStatus } from '${SDK_PACKAGE}';
+import { createPaymentsClient, PaymentError, toMajorString, type PaymentStatus } from '${SDK_PACKAGE}';
 
 export const payments = createPaymentsClient({ actor: 'app:skydo' });
 
@@ -46,7 +46,7 @@ async function saveInvoice(inv: ExportInvoice): Promise<void> {
 /** Called once per invoice. MUST be idempotent: polling and admin actions can both reach it. */
 async function onPaid(inv: ExportInvoice): Promise<void> {
   // TODO: mark the order paid, release deliverables, email the client a receipt.
-  console.log(\`Skydo payment received for \${inv.orderRef}: \${inv.currency} \${(inv.amount / 100).toFixed(2)}\`);
+  console.log(\`Skydo payment received for \${inv.orderRef}: \${inv.currency} \${toMajorString(inv.amount, inv.currency)}\`);
 }
 
 /** Create the invoice (Zoho bridge) or payment instructions (ledger mode) for an order YOU priced. */
@@ -95,10 +95,18 @@ export async function pollUnpaid(): Promise<void> {
   }
 }
 
-/** Ledger mode: an admin confirms money Skydo told you arrived (email/WhatsApp/dashboard/FIRA). */
-export async function recordReceipt(input: { orderRef: string; amountReceived: number; firaNumber?: string; note?: string }) {
+/**
+ * Ledger mode: an admin confirms money Skydo told you arrived. Check it in the Skydo dashboard first.
+ * receiptId = the Skydo transaction reference (or FIRA number): recording it twice is a no-op.
+ */
+export async function recordReceipt(input: { orderRef: string; receiptId: string; amountReceived: number; firaNumber?: string; note?: string }) {
   await payments.skydoRecordPayment(input);
   return refreshStatus(input.orderRef);
+}
+
+/** Cheap status for customers/front-ends: our own record only, never a Zoho call (protects your Zoho API quota). */
+export async function storedStatus(orderRef: string): Promise<PaymentStatus | undefined> {
+  return (await loadInvoice(orderRef))?.status;
 }
 
 /** Ledger mode: what clients still owe you, oldest first. */
@@ -124,7 +132,7 @@ function expressRoutes(): string {
   return `import express, { type NextFunction, type Request, type Response } from 'express';
 import { PaymentError } from '${SDK_PACKAGE}';
 import { assertAdmin } from './admin.js';
-import { outstanding, pollUnpaid, recordReceipt, refreshStatus, requestPayment } from './skydo.js';
+import { outstanding, pollUnpaid, recordReceipt, refreshStatus, requestPayment, storedStatus } from './skydo.js';
 
 export const skydoRouter = express.Router();
 skydoRouter.use(express.json());
@@ -140,15 +148,24 @@ skydoRouter.post('/api/skydo/invoices', wrap(async (req, res) => {
   res.status(201).json(await requestPayment({ orderRef: orderId, ...order }));
 }));
 
+// Public: answers from your own records. The poller (or the admin refresh below) updates them.
 skydoRouter.get('/api/skydo/invoices/:orderRef', wrap(async (req, res) => {
+  const status = await storedStatus(String(req.params.orderRef));
+  if (!status) return void res.status(404).json({ error: 'NOT_FOUND' });
+  res.json({ orderRef: req.params.orderRef, status });
+}));
+
+// Admin: re-read the authoritative status now (Zoho invoice or ledger).
+skydoRouter.post('/api/skydo/invoices/:orderRef/refresh', wrap(async (req, res) => {
+  assertAdmin(req.get('authorization'));
   res.json({ orderRef: req.params.orderRef, status: await refreshStatus(String(req.params.orderRef)) });
 }));
 
 // Ledger mode only: an admin records money Skydo said arrived.
 skydoRouter.post('/api/skydo/receipts', wrap(async (req, res) => {
   assertAdmin(req.get('authorization'));
-  const { orderRef, amountReceived, firaNumber, note } = req.body as { orderRef: string; amountReceived: number; firaNumber?: string; note?: string };
-  res.json({ orderRef, status: await recordReceipt({ orderRef, amountReceived, firaNumber, note }) });
+  const { orderRef, receiptId, amountReceived, firaNumber, note } = req.body as { orderRef: string; receiptId: string; amountReceived: number; firaNumber?: string; note?: string };
+  res.json({ orderRef, status: await recordReceipt({ orderRef, receiptId, amountReceived, firaNumber, note }) });
 }));
 
 skydoRouter.get('/api/skydo/outstanding', wrap(async (req, res) => {
@@ -217,16 +234,19 @@ export async function POST(req: Request) {
       path: 'app/api/skydo/invoices/[orderRef]/route.ts',
       language: 'typescript',
       contents: `${imp}
-import { refreshStatus } from '@/lib/payments/skydo';
+import { storedStatus } from '@/lib/payments/skydo';
 
 export const runtime = 'nodejs';
 
 ${errors}
 
+/** Public: answers from your own records (the poll route keeps them fresh), never calls Zoho. */
 export async function GET(_req: Request, { params }: { params: Promise<{ orderRef: string }> }) {
   try {
     const { orderRef } = await params;
-    return NextResponse.json({ orderRef, status: await refreshStatus(orderRef) });
+    const status = await storedStatus(orderRef);
+    if (!status) return NextResponse.json({ error: 'NOT_FOUND' }, { status: 404 });
+    return NextResponse.json({ orderRef, status });
   } catch (err) {
     return fail(err);
   }
@@ -248,7 +268,7 @@ ${errors}
 export async function POST(req: Request) {
   try {
     assertAdmin(req.headers.get('authorization') ?? undefined);
-    const body = (await req.json()) as { orderRef: string; amountReceived: number; firaNumber?: string; note?: string };
+    const body = (await req.json()) as { orderRef: string; receiptId: string; amountReceived: number; firaNumber?: string; note?: string };
     return NextResponse.json({ orderRef: body.orderRef, status: await recordReceipt(body) });
   } catch (err) {
     return fail(err);
@@ -286,7 +306,7 @@ function fastifyPlugin(): string {
   return `import type { FastifyInstance } from 'fastify';
 import { PaymentError } from '${SDK_PACKAGE}';
 import { assertAdmin } from './admin.js';
-import { outstanding, recordReceipt, refreshStatus, requestPayment } from './skydo.js';
+import { outstanding, recordReceipt, refreshStatus, requestPayment, storedStatus } from './skydo.js';
 
 export async function skydoRoutes(app: FastifyInstance) {
   app.setErrorHandler((err, _req, reply) => {
@@ -302,12 +322,19 @@ export async function skydoRoutes(app: FastifyInstance) {
     return reply.code(201).send(await requestPayment({ orderRef: req.body.orderId, ...order }));
   });
 
-  app.get<{ Params: { orderRef: string } }>('/api/skydo/invoices/:orderRef', async (req) => ({
-    orderRef: req.params.orderRef,
-    status: await refreshStatus(req.params.orderRef),
-  }));
+  // Public: answers from your own records, never calls Zoho.
+  app.get<{ Params: { orderRef: string } }>('/api/skydo/invoices/:orderRef', async (req, reply) => {
+    const status = await storedStatus(req.params.orderRef);
+    if (!status) return reply.code(404).send({ error: 'NOT_FOUND' });
+    return { orderRef: req.params.orderRef, status };
+  });
 
-  app.post<{ Body: { orderRef: string; amountReceived: number; firaNumber?: string; note?: string } }>('/api/skydo/receipts', async (req) => {
+  app.post<{ Params: { orderRef: string } }>('/api/skydo/invoices/:orderRef/refresh', async (req) => {
+    assertAdmin(req.headers.authorization);
+    return { orderRef: req.params.orderRef, status: await refreshStatus(req.params.orderRef) };
+  });
+
+  app.post<{ Body: { orderRef: string; receiptId: string; amountReceived: number; firaNumber?: string; note?: string } }>('/api/skydo/receipts', async (req) => {
     assertAdmin(req.headers.authorization);
     return { orderRef: req.body.orderRef, status: await recordReceipt(req.body) };
   });
@@ -342,9 +369,12 @@ export function skydoGuide(cap: ProviderCapabilities): string {
     `     -d grant_type=authorization_code -d client_id=$ZOHO_CLIENT_ID -d client_secret=$ZOHO_CLIENT_SECRET -d code=<code>`,
     '   ```',
     ``,
-    `   Use your region's accounts host (zoho.com, zoho.eu, zoho.in, zoho.com.au, ...). Put the \`refresh_token\` in \`ZOHO_REFRESH_TOKEN\`.`,
+    `   Use your region's accounts host: accounts.zoho.com / .eu / .in / .com.au / .jp / .com.cn / .sa / .ae / .uk / .sg,`,
+    `   and accounts.zohocloud.ca for Canada. Put the \`refresh_token\` in \`ZOHO_REFRESH_TOKEN\`.`,
     `4. Set the \`ZOHO_*\` variables. \`requestPayment()\` creates the Zoho invoice (reference = your order id) and marks it sent.`,
-    `   Skydo imports it within ~10 minutes. When the client pays, Skydo marks it **paid** in Zoho and attaches the **FIRA**.`,
+    `   Skydo imports Zoho invoices within ~10 minutes. **During setup, confirm the first API-created invoice appears in your`,
+    `   Skydo dashboard** (Skydo documents Zoho sync but not API-created invoices specifically). When the client pays, Skydo marks`,
+    `   it **paid** in Zoho and attaches the **FIRA**. A Zoho "paid" caused by a write-off or credit note is NOT treated as paid.`,
     `   \`pollUnpaid()\` (every 15 min) sees that and calls \`onPaid()\` exactly once.`,
     ``,
     `## Option B: receiving accounts + ledger (no Zoho)`,
@@ -358,12 +388,15 @@ export function skydoGuide(cap: ProviderCapabilities): string {
     ``,
     `2. \`requestPayment()\` returns transfer instructions with your order id as the payment reference. Send them to the client`,
     `   (email, invoice PDF). The expected payment is tracked in \`SKYDO_LEDGER_FILE\`.`,
-    `3. When Skydo emails/WhatsApps you that money arrived, call \`POST /api/skydo/receipts\` (admin) with the amount`,
-    `   received in cents. A short amount (bank fees abroad) keeps the order pending. Match it to the invoice in Skydo too.`,
+    `3. When Skydo emails/WhatsApps you that money arrived, check it in the Skydo dashboard, then call \`POST /api/skydo/receipts\``,
+    `   (admin) with \`receiptId\` (the Skydo transaction reference) and the amount received in cents. Recording the same`,
+    `   receiptId twice is a no-op; a short amount (bank fees abroad) keeps the order pending. Match it to the invoice in Skydo too.`,
     ``,
     `## Things Skydo does not support (so neither does this code)`,
     ``,
-    `- Checkout on your website, cards/UPI, INR, refunds via API, webhooks, recurring payments.`,
+    `- Checkout on your website, cards/UPI, INR, refunds via API (Skydo cannot refund a settled payment directly), webhooks.`,
+    `- Recurring payments: raise one invoice per billing period.`,
+    `- Turn off Zoho online payment gateways on these invoices so clients pay through Skydo (and you get a FIRA).`,
     `- Payment links (InstaLinks) exist but are created by hand in the dashboard and are single-use.`,
     ``,
     `## Constraints`,

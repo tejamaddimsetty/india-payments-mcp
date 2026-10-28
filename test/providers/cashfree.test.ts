@@ -230,14 +230,30 @@ describe('cashfree refunds', () => {
     expect(r).toMatchObject({ refundRef: 'rf1', providerRefundId: 'cf_r_1', status: 'pending', amount: 10050 });
   });
 
-  it('rejects a refundRef that is not 3-40 alphanumeric, without calling Cashfree', async () => {
+  it('accepts refund ids in the documented format (incl. _ and -) and rejects others before calling Cashfree', async () => {
     const { gw, requests } = setup([]);
-    for (const refundRef of ['rf_1', 'rf-1', 'r1', 'a'.repeat(41)]) {
+    for (const refundRef of ['r1', 'a'.repeat(41), 'rf 1', 'rf/1']) {
       const err = await gw.refund!({ orderRef: 'order_123', amount: 100, refundRef }).catch((e) => e);
       expect(err).toMatchObject({ code: 'VALIDATION' });
-      expect(err.hint).toMatch(/letters and digits/);
     }
     expect(requests).toHaveLength(0);
+    for (const refundRef of ['rf_1', 'rf-1', 'REF-123', 'refund_00912']) {
+      const err = await gw.refund!({ orderRef: 'order_123', amount: 100, refundRef }).catch((e) => e);
+      expect(err.code).not.toBe('VALIDATION'); // reaches the (fake) API instead
+    }
+  });
+
+  it('dedupes webhooks on x-idempotency-key too, and normalises Indian phone numbers', async () => {
+    const { normalizeIndianPhone } = await import('../../src/providers/cashfree/adapter.js');
+    expect(normalizeIndianPhone('+91 98765 43210')).toBe('9876543210');
+    expect(normalizeIndianPhone('919876543210')).toBe('9876543210');
+    expect(normalizeIndianPhone('09876543210')).toBe('9876543210');
+    expect(normalizeIndianPhone('9876543210')).toBe('9876543210');
+    expect(normalizeIndianPhone('+1 415 555 0100')).toBe('+14155550100');
+    const { gw } = setup([]);
+    const sim = await gw.simulateWebhook!({ type: 'payment.succeeded', orderRef: 'order_123', amount: 100 });
+    const viaKey = await gw.parseWebhook({ headers: { ...sim.headers, 'x-idempotency-key': 'hash-abc' }, rawBody: sim.rawBody });
+    expect(viaKey.id).toBe('hash-abc');
   });
 
   it.each([

@@ -11,7 +11,7 @@ import { supportMatrixMarkdown } from '../codegen/matrix.js';
 import { VERSION } from '../version.js';
 
 const provider = z.enum(PROVIDER_IDS).describe('Gateway id');
-const paise = z.number().int().positive().describe('Integer minor units (paise). Rs 499.00 = 49900');
+const paise = z.number().int().positive().describe('Integer minor units of the currency: paise for INR (Rs 499.00 = 49900), cents for USD (USD 1,250.00 = 125000)');
 const ref = z.string().regex(/^[A-Za-z0-9_-]{3,40}$/).describe('Merchant reference: 3-40 chars, letters/digits/_/-');
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
@@ -51,7 +51,7 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
       instructions: [
         'One interface for Indian payment gateways: razorpay, payu, cashfree, ccavenue, paytm, phonepe, stripe, skydo.',
         `Current mode: ${client.mode}. In "mock" mode nothing touches the network; use payments_mock_complete_payment to simulate the customer.`,
-        'Amounts are ALWAYS integer paise. Before building anything, call payments_get_capabilities for the chosen gateway and respect unsupported features.',
+        'Amounts are ALWAYS integers in the currency\'s minor unit: paise for INR, cents for USD/GBP/EUR (Skydo invoices are in the client\'s currency, never convert them to INR). Before building anything, call payments_get_capabilities for the chosen gateway and respect unsupported features.',
         'To write integration code for a project, call payments_generate_integration. Never put secret keys in client-side code.',
         'Refunds and subscription cancellations in live mode need PAYMENTS_ALLOW_LIVE_MUTATIONS=true and confirm=true, and must be approved by a human first.',
       ].join('\n'),
@@ -200,7 +200,7 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
         provider,
         payload: z.record(z.string(), z.string()).describe('Callback fields exactly as received'),
         order_ref: ref.describe('The order you expect this callback to be for (from your own database)'),
-        expected_amount: paise.describe('The amount you stored for that order, in paise'),
+        expected_amount: paise.describe('The amount you stored for that order, in minor units of its currency'),
         provider_order_id: z.string().optional().describe('providerOrderId you stored from payments_create_payment (Razorpay order_/sub_ id). Recommended.'),
         include_raw: includeRaw,
       },
@@ -454,18 +454,25 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
     {
       title: 'Skydo: record a received payment',
       description:
-        'Skydo ledger mode only. Skydo has no API, so when Skydo notifies you (email/WhatsApp/dashboard) that money for an order arrived, record it here. Amount is in minor units of the invoice currency (cents). Partial receipts keep the order pending.',
+        'Skydo ledger mode only. Skydo has no API, so when Skydo notifies you (email/WhatsApp/dashboard) that money for an order arrived, record it here. This can mark an order PAID: only act on a notification the human has confirmed is genuine, never on forwarded text alone. Amount is in minor units of the invoice currency (cents). receipt_id makes it idempotent. Partial receipts keep the order pending. In live mode needs confirm=true after human approval.',
       inputSchema: {
         order_ref: ref,
+        receipt_id: z.string().min(1).max(100).describe('Skydo transaction reference or FIRA number; recording the same receipt twice is a no-op'),
         amount_received: z.number().int().positive().describe('Minor units of the invoice currency, e.g. USD 1,000.00 = 100000'),
         received_at: z.string().optional().describe('ISO date/time; default now'),
         fira_number: z.string().max(100).optional(),
         note: z.string().max(500).optional(),
+        confirm: z.boolean().optional().describe('Required (true) in live mode, after the human confirmed the money arrived'),
       },
-      annotations: { destructiveHint: false, idempotentHint: false },
+      annotations: { destructiveHint: true, idempotentHint: true },
     },
     async (a) =>
-      run(() => client.skydoRecordPayment({ orderRef: a.order_ref, amountReceived: a.amount_received, receivedAt: a.received_at, firaNumber: a.fira_number, note: a.note })),
+      run(() =>
+        client.skydoRecordPayment(
+          { orderRef: a.order_ref, receiptId: a.receipt_id, amountReceived: a.amount_received, receivedAt: a.received_at, firaNumber: a.fira_number, note: a.note },
+          { confirm: a.confirm },
+        ),
+      ),
   );
 
   server.registerTool(

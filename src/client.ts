@@ -180,10 +180,16 @@ export class PaymentsClient {
     return gw;
   }
 
-  /** Skydo ledger mode: record money Skydo told you arrived (email/WhatsApp/dashboard/FIRA). */
-  async skydoRecordPayment(input: RecordPaymentInput) {
+  /**
+   * Skydo ledger mode: record money Skydo told you arrived (email/WhatsApp/dashboard/FIRA).
+   * Recording a receipt can mark an order paid, so through the MCP server it is gated like a refund.
+   */
+  async skydoRecordPayment(input: RecordPaymentInput, opts: { confirm?: boolean } = {}) {
     const gw = this.skydo();
-    return this.audited({ action: 'skydo_record_payment', provider: 'skydo', orderRef: input.orderRef, amount: input.amountReceived }, () => gw.recordPayment(input));
+    return this.audited({ action: 'skydo_record_payment', provider: 'skydo', orderRef: input.orderRef, amount: input.amountReceived, detail: { receiptId: input.receiptId } }, async () => {
+      this.assertLiveMutationAllowed('Recording a Skydo receipt', 'skydo', opts.confirm === true);
+      return gw.recordPayment(input);
+    });
   }
 
   /** Skydo ledger mode: orders still waiting for money. */

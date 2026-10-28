@@ -63,7 +63,7 @@ Claude Desktop / Cursor / any stdio client (`mcpServers` config):
 
 Modes: `mock` (no network, no credentials, use this first), `sandbox` (gateway test endpoints, test keys), `live` (real money; refunds and cancellations additionally need `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and `confirm=true` per call after a human approves). Do not give an agent a live-mode server unless you mean it. Check your setup with `npx india-payments-mcp doctor`.
 
-Tools the skill uses: `payments_recommend_gateway`, `payments_get_capabilities`, `payments_check_config`, `payments_generate_integration`, `payments_create_payment`, `payments_mock_complete_payment`, `payments_verify_payment`, `payments_get_status`, `payments_simulate_webhook`, `payments_refund`.
+Tools the skill uses: `payments_recommend_gateway`, `payments_get_capabilities`, `payments_check_config`, `payments_generate_integration`, `payments_create_payment`, `payments_mock_complete_payment`, `payments_verify_payment`, `payments_get_status`, `payments_simulate_webhook`, `payments_refund`, `payments_get_refund_status`, and for Skydo ledger mode `payments_skydo_record_payment` and `payments_skydo_outstanding`. SKILL.md lists all 19 server tools.
 
 ## Other agents
 
@@ -72,4 +72,4 @@ Tools the skill uses: `payments_recommend_gateway`, `payments_get_capabilities`,
 
 ## Accuracy
 
-Gateway facts come from `docs/research/gateway-api-facts.md` (researched 2026-10-28). Each fact is labelled VERIFIED, PARTIAL or UNVERIFIED. Sandbox test cards/UPI ids were not re-fetched during that research and are marked UNVERIFIED with the official page to check. Report corrections as issues with the official doc URL.
+Gateway facts come from `docs/research/gateway-api-facts.md` (researched 2026-10-28), corrected by the round-1 line-by-line checks of every adapter against the official docs in `docs/research/verification/` (2026-10-29). Each fact is labelled VERIFIED, PARTIAL or UNVERIFIED. Nothing has yet been run against live gateway sandboxes. Sandbox test cards/UPI ids were not re-fetched during that research and are marked UNVERIFIED with the official page to check. Report corrections as issues with the official doc URL.

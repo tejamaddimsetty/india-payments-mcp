@@ -6,7 +6,7 @@ Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, Phon
 
 1. **Amount from the server.** Price from server-side cart/plan data. The client sends an item or plan id, never an amount, currency or price.
 2. **Integer paise internally.** `amount_paise BIGINT`. Convert only at the gateway edge: Razorpay/PhonePe/Stripe take paise; Cashfree takes rupees as a number (`10.15`); PayU, Paytm and CCAvenue take rupee strings with 2 decimals (`"499.00"`). No floats for money.
-3. **Verify before fulfilling.** Paid only when the callback signature/hash verifies (constant-time compare) or, for unsigned returns (PhonePe, Cashfree, Skydo; best practice also PayU and CCAvenue), the gateway status API says success, AND the order id and amount match your stored values. A redirect to a success page proves nothing.
+3. **Verify before fulfilling.** Paid only when the callback signature/hash verifies (constant-time compare) or, for unsigned returns (PhonePe, Cashfree, Stripe redirects; best practice also PayU and CCAvenue), the gateway status API says success, AND the order id and amount match your stored values. A redirect to a success page proves nothing.
 4. **Webhooks are the source of truth.** Fulfil from the webhook too; browsers close. Read the raw body bytes before parsing, verify over those bytes, dedupe by event id with a unique constraint, process in a transaction, return 2xx quickly. 4xx for bad signature; 5xx only when your processing failed (so the gateway retries).
 5. **Idempotent fulfilment.** Callback and webhook both arrive, sometimes at once. Use a guarded update (`... WHERE status IN ('created','pending')`) and fulfil only if a row changed.
 6. **Unique orderRef per attempt.** PhonePe, Paytm, Cashfree and PayU reject or misbehave on reuse. One business order, many attempts (`ord_123_a1`, `ord_123_a2`). Gateway order creation is idempotent on that ref.
@@ -24,11 +24,11 @@ Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, Phon
 | Razorpay | hex HMAC-SHA256(`stored_order_id|payment_id`, key_secret); subscriptions reversed `payment_id|subscription_id` | `X-Razorpay-Signature` = hex HMAC-SHA256(raw body, webhook secret ≠ key secret); dedupe `x-razorpay-event-id` |
 | PayU | reverse SHA-512 `SALT|status||||||udf5..udf1|email|firstname|productinfo|amount|txnid|key` (+ `additional_charges|` prefix) | same reverse hash; body JSON or form |
 | Cashfree | none: re-fetch order | `x-webhook-signature` = base64 HMAC-SHA256(timestamp + raw body, client secret), no separator |
-| CCAvenue | AES decrypt of `encResp`; confirm via status API | undocumented: treat as trigger, re-fetch status |
+| CCAvenue | AES decrypt of `encResp` (cbc kit: no MAC, not authentication; gcm kit: auth tag); confirm via status API | undocumented: treat as trigger, re-fetch status |
 | Paytm | `CHECKSUMHASH` (AES-128-CBC checksum over sorted values) | same, form POST |
 | PhonePe v2 | none: Order Status API | `Authorization` = hex sha256(`username:password`), does NOT cover body: re-fetch status |
 | Stripe | n/a (fulfil on webhook) | `Stripe-Signature` t,v1: hex HMAC-SHA256(`t.body`, whsec), check every v1, 300 s tolerance |
-| Skydo | no API | no API |
+| Skydo | no API and no callback: status from the Zoho Books invoice Skydo marks paid, or from receipts you record in the ledger | none (Skydo emails/WhatsApps you) |
 
 ## Test plan
 

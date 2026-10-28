@@ -187,7 +187,9 @@ describe('ccavenue refund', () => {
     const { gw, requests } = gateway([{ match: 'DoWebTrans', body: apiResponse({ Refund_Order_Result: { refund_status: 0, reason: '' } }) }]);
     const r = await gw.refund!({ orderRef: 'ORD1', providerPaymentId: '310009876543', refundRef: 'RF1', amount: 10000 });
     expect(r).toMatchObject({ status: 'pending', refundRef: 'RF1', amount: 10000 });
-    const body = Object.fromEntries(new URLSearchParams(requests[0]!.body));
+    // The order is looked up first (refund_amount is formatted in the order's currency), then refunded.
+    expect(requests.map((q) => new URLSearchParams(q.body).get('command'))).toEqual(['orderStatusTracker', 'refundOrder']);
+    const body = Object.fromEntries(new URLSearchParams(requests.at(-1)!.body));
     expect(body.command).toBe('refundOrder');
     expect(JSON.parse(ccavenueDecrypt(body.enc_request!, WORKING_KEY))).toEqual({ reference_no: '310009876543', refund_amount: '100.00', refund_ref_no: 'RF1' });
   });
@@ -233,7 +235,8 @@ describe('ccavenue request details', () => {
       { match: 'DoWebTrans', body: apiResponse({ Refund_Order_Result: { refund_status: 0 } }) },
     ]);
     await gw.refund!({ orderRef: 'ORD1', providerPaymentId: '310009876543', refundRef: 'RF1', amount: 100 });
-    expect(Object.fromEntries(new URLSearchParams(requests[0]!.body))).toMatchObject({ command: 'refundOrder', version: '1.1' });
+    expect(Object.fromEntries(new URLSearchParams(requests[0]!.body))).toMatchObject({ command: 'orderStatusTracker', version: '1.2' });
+    expect(Object.fromEntries(new URLSearchParams(requests.at(-1)!.body))).toMatchObject({ command: 'refundOrder', version: '1.1' });
   });
 
   it('sends billing_country as a country name', async () => {

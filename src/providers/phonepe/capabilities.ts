@@ -21,7 +21,7 @@ export const phonepeCapabilities: ProviderCapabilities = {
       'partial',
       'Authorization header = sha256hex("username:password") set in the Business Dashboard. This is a static shared secret: it does NOT sign the body. Always confirm with payments_get_status before fulfilling. The newer HMAC header scheme (x-phonepe-checksum-*) is not implemented because its algorithm is undocumented.',
     ),
-    customers: featureRow('unsupported', 'PhonePe PG has no customer object; prefill a phone number via providerOptions.prefillUserLoginDetails.'),
+    customers: featureRow('unsupported', 'PhonePe PG has no customer object; customer.phone is sent as prefillUserLoginDetails.phoneNumber.'),
     subscriptions: featureRow('not_implemented', 'PhonePe Autopay (UPI mandates, plus eNACH) exists under /payment-gateway/autopay/ but is not wired up here.'),
     settlements: featureRow('not_implemented', 'A settlement API section exists in PhonePe docs (developer.phonepe.com/settlement); use the Business Dashboard reports for now.'),
     payouts: featureRow('unsupported', 'No PG payouts / disbursal API is documented in the PhonePe PG developer docs.'),

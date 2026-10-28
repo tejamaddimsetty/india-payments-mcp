@@ -10,10 +10,13 @@ export const paytmCapabilities: ProviderCapabilities = {
   features: {
     createPayment: featureRow('supported', 'Initiate Transaction API -> txnToken (valid 15 min) + JS Checkout. A showPaymentPage form-post fallback is included for redirect integrations.'),
     verifyPayment: featureRow('supported', 'CHECKSUMHASH on the callback POST: Paytm checksum over the sorted field values, merchant key.'),
-    paymentStatus: featureRow('supported', 'POST /v3/order/status, keyed by our orderRef (Paytm uses the merchant order id). Response head.signature is verified against the raw body when present. 501 (server down) throws PROVIDER_UNAVAILABLE; 330/334/335 throw instead of reporting a failed payment.'),
-    refund: featureRow('supported', 'POST /refund/apply on securegw(-stage).paytmpayments.in. Needs providerPaymentId (Paytm TXNID). refId = refundRef (max 50 chars) de-duplicates: a retry that hits 617/671/626/629 (duplicate refId) returns the existing refund via refund status.'),
+    paymentStatus: featureRow('supported', 'POST /v3/order/status, keyed by our orderRef (Paytm uses the merchant order id). Response head.signature is verified when present (raw body bytes, else the re-serialised body; confirm in sandbox). 501 (server down) throws PROVIDER_UNAVAILABLE; 330/334/335 throw instead of reporting a failed payment.'),
+    refund: featureRow('supported', 'POST /refund/apply on securegw(-stage).paytmpayments.in. Needs providerPaymentId (Paytm TXNID). refId = refundRef (max 50 chars) de-duplicates: a retry that hits 617/671 (duplicate refund request / refId) returns the existing refund via refund status. 626 (another refund on this order in progress) throws PROVIDER_UNAVAILABLE: retry later with the same refundRef. 629 (refund already successful) returns the refund for this refId if it exists, else rethrows 629 as PROVIDER_ERROR.'),
     refundStatus: featureRow('supported', 'POST /v2/refund/status on securegw(-stage).paytmpayments.in by orderId + refId. Lookup errors (631 not found, 335, 600, 330) throw rather than report a failed refund.'),
-    webhooks: featureRow('partial', 'Payment notifications (form key-values + CHECKSUMHASH) and refund notifications (Accept/Success Refund JSON {head:{signature}, body}, signature over the raw body) are verified and normalised. Partial because the documented FAILED refund notification carries no signature, so it is rejected: poll getRefundStatus for failures.'),
+    webhooks: featureRow(
+      'partial',
+      'Payment notifications (form key-values + CHECKSUMHASH) and refund notifications (Accept/Success Refund JSON {head:{signature}, body}) are always signature-verified and normalised. Success Refund (credit to the customer initiated) -> refund.processed. Accept Refund SUCCESS -> type "unknown" (accepted, refund not yet initiated; providerEventType REFUND_SUCCESS). Accept Refund FAILED (signed) is normalised to refund.failed; the unsigned Success Refund FAILED sample is rejected, so poll getRefundStatus for those failures.',
+    ),
     customers: featureRow('unsupported', 'Paytm PG has no customer-object API; custId is just a string sent per transaction.'),
     subscriptions: featureRow('not_implemented', 'Paytm Subscription API (recurring / UPI Autopay mandates) exists in the paytmpayments.com docs.'),
     settlements: featureRow('not_implemented', 'Paytm Settlement API / settlement reports exist in the paytmpayments.com docs.'),
@@ -28,14 +31,25 @@ export const paytmCapabilities: ProviderCapabilities = {
     { env: 'PAYTM_MID', key: 'mid', required: true, secret: false, description: 'Merchant ID (Dashboard > Developer Settings > API Keys). Test and production MIDs differ.' },
     { env: 'PAYTM_MERCHANT_KEY', key: 'merchantKey', required: true, secret: true, description: '16-character merchant key; signs and verifies every checksum.' },
     { env: 'PAYTM_WEBSITE', key: 'website', required: false, secret: false, description: 'websiteName. Defaults to WEBSTAGING in sandbox and DEFAULT in live.' },
+    {
+      env: 'PAYTM_VERIFY_RESPONSE_SIGNATURE',
+      key: 'verifyResponseSignature',
+      required: false,
+      secret: false,
+      description:
+        "'true' (default) or 'false'. 'false' skips head.signature checks on API responses (status, refund, refund status) only; webhooks are always verified. Paytm does not document the signed string for responses: confirm in sandbox, and only disable if valid responses are rejected.",
+    },
   ],
   constraints: [
     'Hosts were rebranded: staging securestage.paytmpayments.com, production secure.paytmpayments.com. securegw(-stage).paytm.in only appears in legacy docs.',
     'Refund apply and refund status use the documented securegw hosts: staging securegw-stage.paytmpayments.in, production securegw.paytmpayments.in. Order status stays on securestage/secure.paytmpayments.com (the .in staging host returned 503 for it). Confirm in sandbox.',
-    'JSON API responses are checked against head.signature (over the raw body bytes) when Paytm includes one; unsigned error responses are accepted on TLS alone.',
+    'JSON API responses are checked against head.signature when Paytm includes one: first over the exact raw body bytes, then over JSON.stringify of the parsed body. Paytm does not name the signed string; confirm in sandbox (PAYTM_VERIFY_RESPONSE_SIGNATURE=false disables this for API responses only, never for webhooks). Unsigned error responses are accepted on TLS alone.',
     'custId is sanitised to Paytm\'s allowed characters (letters, digits, @ ! = _ $ .); other characters become "_".',
-    'Paytm payment-mode codes are normalised: CC/DC -> card, NB -> netbanking, PPI -> wallet, PAYTMCC -> paylater.',
-    'orderId (our orderRef) max 50 characters and must be unique per transaction attempt.',
+    'Paytm payment-mode codes are normalised: CC/DC -> card, NB -> netbanking, PPI -> wallet, "Paytm Postpaid" / PAYTMCC -> paylater.',
+    'orderId (our orderRef) max 50 characters, letters/digits plus @ - _ . only ("|" is rejected: Paytm code 1008), and must be unique per transaction attempt.',
+    'userInfo.mobile must be 10 digits: customer.phone is reduced to digits, a leading 91 (12 digits) or 0 (11 digits) is dropped, and anything else is not sent. customer.name is split into firstName / lastName.',
+    'Initiate Transaction is idempotent: the same request returns 0002 "Success Idempotent"; the same orderId with different parameters returns 2023 "Repeat Request Inconsistent".',
+    'createPayment returns checkout.options for window.Paytm.CheckoutJS.init (root, flow, data). checkout.options.fallbackRedirect is this library\'s own field, not a Paytm config key: strip it before init, or use it (showPaymentPage form post with mid, orderId, txnToken) when JS Checkout cannot run.',
     'txnToken from Initiate Transaction expires after 15 minutes; create a new payment after that.',
     'Merchant key must be exactly 16 bytes (AES-128 key).',
     'websiteName must be WEBSTAGING on staging and DEFAULT (or your configured name) in production.',
@@ -51,5 +65,5 @@ export const paytmCapabilities: ProviderCapabilities = {
   platformPlugins: {
     shopify: 'No official Paytm Shopify app found (unverified absence).',
   },
-  lastVerified: '2026-10-28',
+  lastVerified: '2026-10-29',
 };

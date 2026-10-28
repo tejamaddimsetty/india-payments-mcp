@@ -3,12 +3,15 @@ import { PaymentError } from '../../src/core/errors.js';
 import {
   mapPaytmPaymentMode,
   mapPaytmTxnStatus,
+  normalizePaytmMobile,
   paytm,
+  paytmBodySignatureMatches,
   PAYTM_LIVE_HOST,
   PAYTM_REFUND_LIVE_HOST,
   PAYTM_REFUND_STAGING_HOST,
   PAYTM_STAGING_HOST,
   sanitizePaytmCustId,
+  splitPaytmName,
 } from '../../src/providers/paytm/adapter.js';
 import { calculateChecksum, extractRawJsonMember, generateSignature, paytmStringByParams, verifySignature } from '../../src/providers/paytm/checksum.js';
 import { fakeFetch, testContext } from '../helpers.js';
@@ -17,9 +20,9 @@ const KEY = 'abcdEFGH1234!@#$'; // 16 bytes
 const MID = 'TESTMID00000000001';
 const creds = { mid: MID, merchantKey: KEY };
 
-function gateway(routes: Parameters<typeof fakeFetch>[0], environment: 'sandbox' | 'live' = 'sandbox') {
+function gateway(routes: Parameters<typeof fakeFetch>[0], environment: 'sandbox' | 'live' = 'sandbox', extra: { verifyResponseSignature?: string } = {}) {
   const ff = fakeFetch(routes);
-  const gw = paytm.create(creds, testContext('paytm', ff.fetch, { environment, extractError: paytm.extractError }));
+  const gw = paytm.create({ ...creds, ...extra }, testContext('paytm', ff.fetch, { environment, extractError: paytm.extractError }));
   return { gw, requests: ff.requests };
 }
 
@@ -112,6 +115,13 @@ describe('paytm adapter', () => {
     expect(() => paytm.create({ mid: MID, merchantKey: 'short' }, ctx)).toThrow(/16/);
     const live = testContext('paytm', fakeFetch([]).fetch, { environment: 'live' });
     expect(() => paytm.create({ ...creds, website: 'WEBSTAGING' }, live)).toThrow(PaymentError);
+    expect(() => paytm.create({ ...creds, verifyResponseSignature: 'nope' }, ctx)).toThrow(/PAYTM_VERIFY_RESPONSE_SIGNATURE/);
+    expect(() => paytm.create({ ...creds, verifyResponseSignature: 'FALSE' }, ctx)).not.toThrow();
+    expect(paytm.capabilities.credentials.find((c) => c.key === 'verifyResponseSignature')).toMatchObject({
+      env: 'PAYTM_VERIFY_RESPONSE_SIGNATURE',
+      required: false,
+    });
+    expect(paytm.capabilities.credentials.find((c) => c.key === 'verifyResponseSignature')!.description).toMatch(/confirm in sandbox/);
   });
 
   it('createPayment sends a signed initiateTransaction and returns JS checkout + form fallback', async () => {
@@ -122,7 +132,7 @@ describe('paytm adapter', () => {
       orderRef: 'ORD_1',
       amount: 49900,
       returnUrl: 'https://shop.test/paytm/callback',
-      customer: { phone: '9999999999', email: 'a@b.test', name: 'Asha' },
+      customer: { phone: '+91 99999-99999', email: 'a@b.test', name: 'Asha  Rani Kumar' },
     });
     const req = requests[0]!;
     expect(req.method).toBe('POST');
@@ -136,7 +146,7 @@ describe('paytm adapter', () => {
       orderId: 'ORD_1',
       callbackUrl: 'https://shop.test/paytm/callback',
       txnAmount: { value: '499.00', currency: 'INR' },
-      userInfo: { custId: 'CUST_ORD_1', mobile: '9999999999', email: 'a@b.test', firstName: 'Asha' },
+      userInfo: { custId: 'CUST_ORD_1', mobile: '9999999999', email: 'a@b.test', firstName: 'Asha', lastName: 'Rani Kumar' },
     });
 
     expect(res.providerOrderId).toBe('ORD_1');
@@ -155,6 +165,49 @@ describe('paytm adapter', () => {
         fields: { mid: MID, orderId: 'ORD_1', txnToken: 'TOKEN123' },
       },
     });
+  });
+
+  it('createPayment retries are allowed (0002 Success Idempotent is success) (P8)', async () => {
+    const { gw, requests } = gateway([
+      { match: 'initiateTransaction', body: signedResponse({ resultInfo: { resultStatus: 'S', resultCode: '0002', resultMsg: 'Success Idempotent' }, txnToken: 'TOKEN_AGAIN' }) },
+    ]);
+    const res = await gw.createPayment({ orderRef: 'ORD_1', amount: 100, returnUrl: 'https://x.test' });
+    expect(requests).toHaveLength(1);
+    if (res.checkout.type === 'js_sdk') expect((res.checkout.options.data as { token: string }).token).toBe('TOKEN_AGAIN');
+    const inconsistent = gateway([
+      { match: 'initiateTransaction', body: { body: { resultInfo: { resultStatus: 'F', resultCode: '2023', resultMsg: 'Repeat Request Inconsistent' } } } },
+    ]);
+    await expect(inconsistent.gw.createPayment({ orderRef: 'ORD_1', amount: 200, returnUrl: 'https://x.test' })).rejects.toMatchObject({
+      code: 'PROVIDER_ERROR',
+      providerCode: '2023',
+    });
+  });
+
+  it('userInfo.mobile is sent only as 10 digits; name is split (P3, P7)', async () => {
+    expect(normalizePaytmMobile('+91 98765 43210')).toBe('9876543210');
+    expect(normalizePaytmMobile('919876543210')).toBe('9876543210');
+    expect(normalizePaytmMobile('09876543210')).toBe('9876543210');
+    expect(normalizePaytmMobile('98765-43210')).toBe('9876543210');
+    expect(normalizePaytmMobile('+1 415 555 0100')).toBeUndefined(); // 11 digits, not a 0 prefix
+    expect(normalizePaytmMobile('+44 20 7946 0958')).toBeUndefined(); // 12 digits, not 91
+    expect(normalizePaytmMobile('12345')).toBeUndefined();
+    expect(normalizePaytmMobile(undefined)).toBeUndefined();
+    expect(splitPaytmName('Asha')).toEqual({ firstName: 'Asha', lastName: undefined });
+    expect(splitPaytmName('  Asha   Rani ')).toEqual({ firstName: 'Asha', lastName: 'Rani' });
+    expect(splitPaytmName(undefined)).toEqual({ firstName: undefined, lastName: undefined });
+    const { gw, requests } = gateway([{ match: 'initiateTransaction', body: { body: { resultInfo: { resultStatus: 'S' }, txnToken: 'T' } } }]);
+    await gw.createPayment({ orderRef: 'O1', amount: 100, returnUrl: 'https://x.test', customer: { phone: '+1 415 555 0100' } });
+    expect(signedBody(requests[0]!.body).userInfo).toEqual({ custId: 'CUST_O1' });
+  });
+
+  it('validates the orderId charset and rejects "|" before calling Paytm', async () => {
+    const { gw, requests } = gateway([{ match: 'initiateTransaction', body: { body: { resultInfo: { resultStatus: 'S' }, txnToken: 'T' } } }]);
+    await expect(gw.createPayment({ orderRef: 'ORD|1', amount: 100, returnUrl: 'https://x.test' })).rejects.toThrow(/1008/);
+    await expect(gw.createPayment({ orderRef: 'ORD 1', amount: 100, returnUrl: 'https://x.test' })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.createPayment({ orderRef: 'ORD/1', amount: 100, returnUrl: 'https://x.test' })).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(requests).toHaveLength(0);
+    await gw.createPayment({ orderRef: 'a-Z_0.9@x', amount: 100, returnUrl: 'https://x.test' });
+    expect(requests).toHaveLength(1);
   });
 
   it('createPayment requires returnUrl and surfaces resultStatus F', async () => {
@@ -266,6 +319,34 @@ describe('paytm adapter', () => {
     await expect(unsigned.gw.getPaymentStatus({ orderRef: 'ORD_1' })).resolves.toMatchObject({ status: 'captured' });
   });
 
+  it('falls back to the re-serialised body when the raw-bytes signature does not match (P1)', async () => {
+    const good = { resultInfo: { resultStatus: 'TXN_SUCCESS', resultCode: '01', resultMsg: 'Txn Success' }, txnId: 'T9', orderId: 'ORD_1', txnAmount: '499.00' };
+    // Paytm signed JSON.stringify(body) but sent it pretty-printed: raw bytes differ, re-serialised matches.
+    const sig = generateSignature(JSON.stringify(good), KEY);
+    const pretty = `{"head":{"signature":"${sig}"},"body":${JSON.stringify(good, null, 2)}}`;
+    expect(paytmBodySignatureMatches(pretty, KEY, sig)).toBe(true);
+    expect(paytmBodySignatureMatches(pretty, 'zzzzzzzzzzzzzzzz', sig)).toBe(false);
+    expect(paytmBodySignatureMatches('not json', KEY, sig)).toBe(false);
+    const p = gateway([{ match: '/v3/order/status', body: pretty }]);
+    await expect(p.gw.getPaymentStatus({ orderRef: 'ORD_1' })).resolves.toMatchObject({ status: 'captured', amount: 49900 });
+    // Neither candidate matches -> still rejected.
+    const tampered = pretty.replace('"499.00"', '"4.99"');
+    await expect(gateway([{ match: '/v3/order/status', body: tampered }]).gw.getPaymentStatus({ orderRef: 'ORD_1' })).rejects.toMatchObject({ code: 'SIGNATURE_INVALID' });
+  });
+
+  it('PAYTM_VERIFY_RESPONSE_SIGNATURE=false skips API response checks but never webhook checks (P1)', async () => {
+    const good = { resultInfo: { resultStatus: 'TXN_SUCCESS', resultCode: '01', resultMsg: 'Txn Success' }, txnId: 'T9', orderId: 'ORD_1', txnAmount: '499.00' };
+    const forged = signedResponse(good, 'zzzzzzzzzzzzzzzz');
+    const off = gateway([{ match: '/v3/order/status', body: forged }], 'sandbox', { verifyResponseSignature: 'false' });
+    await expect(off.gw.getPaymentStatus({ orderRef: 'ORD_1' })).resolves.toMatchObject({ status: 'captured' });
+    const on = gateway([{ match: '/v3/order/status', body: forged }], 'sandbox', { verifyResponseSignature: 'true' });
+    await expect(on.gw.getPaymentStatus({ orderRef: 'ORD_1' })).rejects.toMatchObject({ code: 'SIGNATURE_INVALID' });
+    // Webhook with a wrong signature is still rejected when the flag is off.
+    const body = { orderId: 'ORD_1', txnId: 'T9', refId: 'RF', refundId: 'R', refundAmount: '1.00', userCreditInitiateTimestamp: '2026-10-28 15:30:00.0' };
+    const badHook = `{"head":{"signature":"${generateSignature(JSON.stringify(body), 'zzzzzzzzzzzzzzzz')}","version":"v1"},"body":${JSON.stringify(body)}}`;
+    await expect(off.gw.parseWebhook({ headers: {}, rawBody: badHook })).rejects.toMatchObject({ code: 'SIGNATURE_INVALID' });
+  });
+
   it('status lookup errors are not reported as a failed payment (M8)', async () => {
     const st = (resultCode: string, resultMsg: string) =>
       gateway([{ match: '/v3/order/status', body: { body: { resultInfo: { resultStatus: 'TXN_FAILURE', resultCode, resultMsg } } } }]).gw;
@@ -282,6 +363,7 @@ describe('paytm adapter', () => {
     expect(mapPaytmPaymentMode('NB')).toBe('netbanking');
     expect(mapPaytmPaymentMode('PPI')).toBe('wallet');
     expect(mapPaytmPaymentMode('PAYTMCC')).toBe('paylater');
+    expect(mapPaytmPaymentMode('Paytm Postpaid')).toBe('paylater');
     expect(mapPaytmPaymentMode('UPI')).toBe('upi');
     expect(mapPaytmPaymentMode('BALANCE')).toBe('balance');
     expect(mapPaytmPaymentMode(undefined)).toBeUndefined();
@@ -347,10 +429,15 @@ describe('paytm adapter', () => {
     expect(requests).toHaveLength(0);
   });
 
-  it('a duplicate refId returns the existing refund instead of throwing (M12)', async () => {
-    for (const code of ['617', '671', '626', '629']) {
+  it('a duplicate refId returns the existing refund instead of throwing (M12, P2)', async () => {
+    const messages: Record<string, string> = {
+      '617': 'Refund Already Raised',
+      '671': 'Refund retry is not supported with same refund id',
+      '629': 'Refund is already Successful',
+    };
+    for (const code of ['617', '671', '629']) {
       const { gw, requests } = gateway([
-        { match: '/refund/apply', body: { body: { resultInfo: { resultStatus: 'TXN_FAILURE', resultCode: code, resultMsg: 'Refund Already Raised' } } } },
+        { match: '/refund/apply', body: { body: { resultInfo: { resultStatus: 'TXN_FAILURE', resultCode: code, resultMsg: messages[code] } } } },
         { match: '/v2/refund/status', body: signedResponse({ resultInfo: { resultStatus: 'TXN_SUCCESS', resultCode: '10' }, refId: 'RF_1', refundId: 'R1', refundAmount: '100.00' }) },
       ]);
       const r = await gw.refund!({ orderRef: 'ORD_1', providerPaymentId: 'T9', refundRef: 'RF_1', amount: 10000 });
@@ -358,6 +445,30 @@ describe('paytm adapter', () => {
       expect(requests[1]!.url).toBe(`${PAYTM_REFUND_STAGING_HOST}/v2/refund/status`);
       expect(signedBody(requests[1]!.body)).toEqual({ mid: MID, orderId: 'ORD_1', refId: 'RF_1' });
     }
+    // 626: another refund on this order is in progress -> retryable, no status lookup.
+    const busy = gateway([
+      {
+        match: '/refund/apply',
+        body: { body: { resultInfo: { resultStatus: 'TXN_FAILURE', resultCode: '626', resultMsg: 'Another Refund on same order is already in Progress, please retry after few minutes' } } },
+      },
+    ]);
+    await expect(busy.gw.refund!({ orderRef: 'ORD_1', providerPaymentId: 'T9', refundRef: 'RF_1', amount: 10000 })).rejects.toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE',
+      retryable: true,
+      providerCode: '626',
+      providerMessage: 'Another Refund on same order is already in Progress, please retry after few minutes',
+    });
+    expect(busy.requests).toHaveLength(1);
+    // 629 where this refId is unknown (631) -> the original 629, not "Record not found".
+    const done = gateway([
+      { match: '/refund/apply', body: { body: { resultInfo: { resultStatus: 'TXN_FAILURE', resultCode: '629', resultMsg: 'Refund is already Successful' } } } },
+      { match: '/v2/refund/status', body: { body: { resultInfo: { resultStatus: 'TXN_FAILURE', resultCode: '631', resultMsg: 'Record not found' } } } },
+    ]);
+    await expect(done.gw.refund!({ orderRef: 'ORD_1', providerPaymentId: 'T9', refundRef: 'RF_NEW', amount: 10000 })).rejects.toMatchObject({
+      code: 'PROVIDER_ERROR',
+      providerCode: '629',
+      providerMessage: 'Refund is already Successful',
+    });
     // Any other TXN_FAILURE still throws.
     const { gw } = gateway([{ match: '/refund/apply', body: { body: { resultInfo: { resultStatus: 'TXN_FAILURE', resultCode: '619', resultMsg: 'Invalid refund amount' } } } }]);
     await expect(gw.refund!({ orderRef: 'O', providerPaymentId: 'T', refundRef: 'R', amount: 100 })).rejects.toMatchObject({ code: 'PROVIDER_ERROR', providerCode: '619' });
@@ -416,20 +527,31 @@ describe('paytm adapter', () => {
     await expect(gw.parseWebhook({ headers: refund.headers, rawBody: tampered })).rejects.toMatchObject({ code: 'SIGNATURE_INVALID' });
   });
 
-  it('refund webhooks: Accept SUCCESS / FAILED, pretty-printed bodies, missing signature (M14)', async () => {
+  it('refund webhooks: Accept SUCCESS is informational, Accept FAILED, Success Refund, missing signature (M14, P4, P6)', async () => {
     const { gw } = gateway([]);
-    const base = { orderId: 'ORD_1', txnId: 'T9', txnAmount: '100.00', refId: 'RF_2', refundId: 'R2', refundAmount: '30.00', totalRefundAmount: '30.00' };
+    // Documented Accept Refund body: refundAmount is cumulative and there is no totalRefundAmount or mid.
+    const base = { orderId: 'ORD_1', txnId: 'T9', txnAmount: '100.00', refId: 'RF_2', refundId: 'R2', refundAmount: '30.00' };
     const accepted = await gw.parseWebhook({
       headers: { 'content-type': 'application/json' },
       rawBody: refundWebhook({ ...base, status: 'SUCCESS', acceptRefundTimestamp: '2026-10-28 15:30:00.0' }, { pretty: true }),
     });
-    expect(accepted).toMatchObject({ type: 'refund.processed', id: 'refund:RF_2:SUCCESS', status: 'partially_refunded', amount: 3000, occurredAt: '2026-10-28T10:00:00.000Z' });
+    expect(accepted).toMatchObject({ type: 'unknown', providerEventType: 'REFUND_SUCCESS', id: 'refund:RF_2:SUCCESS', refundRef: 'RF_2', occurredAt: '2026-10-28T10:00:00.000Z' });
+    expect(accepted.status).toBeUndefined();
+    expect(accepted.amount).toBeUndefined();
 
+    // Accept Refund FAILED is signed and is normalised.
     const failed = await gw.parseWebhook({
       headers: { 'content-type': 'application/json' },
       rawBody: refundWebhook({ ...base, status: 'FAILED', rejectRefundReasonCode: '501', rejectRefundReasonMessage: 'Refund Failed' }),
     });
     expect(failed).toMatchObject({ type: 'refund.failed', id: 'refund:RF_2:FAILED', status: undefined });
+
+    // Success Refund: credit initiated, refundAmount = this refund, totalRefundAmount = cumulative.
+    const success = await gw.parseWebhook({
+      headers: { 'content-type': 'application/json' },
+      rawBody: refundWebhook({ ...base, mid: MID, totalRefundAmount: '30.00', userCreditInitiateTimestamp: '2026-10-28 15:31:00.0' }),
+    });
+    expect(success).toMatchObject({ type: 'refund.processed', id: 'refund:RF_2:CREDIT_INITIATED', status: 'partially_refunded', amount: 3000 });
 
     await expect(gw.parseWebhook({ headers: {}, rawBody: refundWebhook({ ...base, status: 'FAILED' }, { sign: false }) })).rejects.toMatchObject({ code: 'SIGNATURE_INVALID' });
     await expect(gw.parseWebhook({ headers: {}, rawBody: refundWebhook({ ...base, mid: 'OTHERMID' }) })).rejects.toMatchObject({ code: 'SIGNATURE_INVALID' });
