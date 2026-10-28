@@ -69,7 +69,7 @@ Dedupe webhooks on header `x-razorpay-event-id`. VERIFIED (https://razorpay.com/
 | Razorpay | Unified |
 |---|---|
 | order `created` / `attempted` | `created` / `pending` |
-| order `paid` | `captured` |
+| order `paid` (and `amount_paid >= amount`) | `captured` |
 | payment `created` | `pending` |
 | payment `authorized` | `authorized` (NOT paid; capture or it auto-refunds after the capture window) |
 | payment `captured` | `captured` |
@@ -80,7 +80,9 @@ Common webhook events: `payment.authorized`, `payment.captured`, `payment.failed
 
 ## Gotchas
 
-- `authorized` is not money. Turn on auto-capture (Dashboard > Account & Settings > Payment Capture) or call capture; uncaptured payments are auto-refunded.
+- `authorized` is not money. Turn on auto-capture (Dashboard > Account & Settings > Payment Capture) or call capture; uncaptured payments are auto-refunded. This project has no capture API: its `verifyPayment` reports `captured` (and `paid: true`) only when the order is fully paid (`status: paid`, `amount_paid >= amount`), otherwise `authorized` with `paid: false`. A captured instalment of a partly paid order is `pending` in `getPaymentStatus`.
+- This project refuses `transfers`, `partial_payment` and `first_payment_min_amount` in `providerOptions` (and `plan_id`, `total_count`, `customer_notify`, `notes`, `offer_id`, `addons`, `quantity` for subscriptions).
+- A reused refund `receipt` is rejected as a duplicate. After `OUTCOME_UNKNOWN` or that rejection, this project lists the payment's refunds (`GET /v1/payments/{id}/refunds`), matches the receipt and returns the existing refund; refund status accepts `providerPaymentId` + refundRef for the same lookup.
 - Build the signature string from your stored `order_id`. Using `razorpay_order_id` from the client lets an attacker replay a valid signature from a cheaper order.
 - Webhook secret != key secret. Most "signature invalid" bugs are this, or verifying `JSON.stringify(req.body)` instead of raw bytes.
 - Same host for test and live: a live key in a dev env charges real cards.

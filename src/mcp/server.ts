@@ -474,7 +474,7 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
     {
       title: 'Skydo: record a received payment',
       description:
-        'Skydo ledger mode only. Skydo has no API, so when Skydo notifies you (email/WhatsApp/dashboard) that money for an order arrived, record it here. This can mark an order PAID: only act on a notification the human has confirmed is genuine, never on forwarded text alone. Amount is in minor units of the invoice currency (cents). receipt_id makes it idempotent. Partial receipts keep the order pending. In live mode needs confirm=true after human approval.',
+        'Skydo ledger mode only. Skydo has no API, so when Skydo notifies you (email/WhatsApp/dashboard) that money for an order arrived, record it here. This can mark an order PAID: only act on a notification the human has confirmed is genuine, never on forwarded text alone. Amount is in minor units of the invoice currency (cents). receipt_id makes it idempotent. Partial receipts keep the order pending. Through this server it needs PAYMENTS_ALLOW_LIVE_MUTATIONS=true and confirm=true after human approval in sandbox AND live mode (Skydo has no sandbox).',
       inputSchema: {
         order_ref: ref,
         receipt_id: z.string().min(1).max(100).describe('Skydo transaction reference or FIRA number; recording the same receipt twice is a no-op'),
@@ -482,7 +482,7 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
         received_at: z.string().optional().describe('ISO date/time; default now'),
         fira_number: z.string().max(100).optional(),
         note: z.string().max(500).optional(),
-        confirm: z.boolean().optional().describe('Required (true) in live mode, after the human confirmed the money arrived'),
+        confirm: z.boolean().optional().describe('Required (true) in sandbox and live mode, after the human confirmed the money arrived'),
       },
       annotations: { destructiveHint: true, idempotentHint: true },
     },

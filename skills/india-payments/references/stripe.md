@@ -60,12 +60,14 @@ Refunding an uncaptured PaymentIntent (`requires_capture`) cancels it instead (f
 |---|---|
 | `requires_payment_method` / `requires_confirmation` / `requires_action` | `created` |
 | `processing` | `pending` (India recurring card debits sit here ~26h) |
-| `requires_capture` | `authorized` |
+| `requires_capture` | `authorized` (NOT paid in this project; the authorisation lapses after about 7 days unless captured) |
 | `succeeded` | `captured` |
 | `canceled` | `cancelled` |
 | charge `refunded` / `amount_refunded > 0` | `refunded` / `partially_refunded` |
 
 Refunds: `POST /v1/refunds {payment_intent, amount?}`; status `pending|succeeded|failed|canceled|requires_action`.
+
+This project: a fully refunded payment is `refunded` and never `paid`, so replaying a `success_url` after a refund does not re-fulfil. `providerOptions` may not set `capture_method`, `transfer_data`, `on_behalf_of`, `application_fee_amount`, `transfer_group`, `metadata`, `confirm`, `customer`, `payment_method`, `off_session`, `discounts` or the Checkout URLs/line items (subscriptions: also `subscription_data`); pass metadata through `metadata`, where `order_ref` cannot be overridden.
 
 ## RBI e-mandate rules for recurring (VERIFIED https://docs.stripe.com/india-recurring-payments)
 

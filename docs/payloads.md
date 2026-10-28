@@ -105,7 +105,7 @@ When a live key is configured in sandbox mode, the same provider entry gains:
 { "initError": "PAYMENTS_MODE=sandbox but RAZORPAY_KEY_ID is a live key (rzp_live_). Refusing to move real money in sandbox mode." }
 ```
 
-For Skydo, every variable is optional (`ready` is always `true`); a missing or broken setup shows up as `initError`, for example `"Skydo needs SKYDO_RECEIVING_ACCOUNTS (your account details from the Skydo dashboard) and/or the ZOHO_* variables for the Zoho Books bridge."`
+For Skydo, every variable is optional. When neither mode is configured (or the Zoho bridge is half-configured), the entry has `ready: false` and a `setup` string, for example `"Skydo needs SKYDO_RECEIVING_ACCOUNTS (your account details from the Skydo dashboard) and/or the ZOHO_* variables for the Zoho Books bridge. ..."`; any other broken setup shows up as `initError`.
 
 ### `payments_recommend_gateway`
 
@@ -331,15 +331,16 @@ With `PAYMENTS_MODE=mock`, the result text is prefixed with `MOCK MODE: simulate
 {
   "valid": true,
   "paid": true,
-  "status": "authorized",
+  "status": "captured",
   "orderRef": "ORD_1001",
   "providerOrderId": "order_PbX4qJ7d2Kf9Lm",
   "providerPaymentId": "pay_PbX5aQ1zZ8Yw3T",
+  "amount": 49900,
   "verifiedVia": "signature"
 }
 ```
 
-`authorized` is expected here: the signature proves authorisation, and auto-capture moves the payment to `captured`. Confirm capture through the `payment.captured` webhook or `payments_get_status`. The signature is computed with `provider_order_id` (the id you stored at create time), never with the `razorpay_order_id` in the payload; without `provider_order_id` or `order_ref` the callback is rejected.
+The signature only proves the payment was authorised, so the adapter fetches the order and reports `captured` only when the order is fully paid (`status: "paid"` and `amount_paid >= amount`). Until auto-capture has run (usually seconds), or with manual capture, the same call returns `status: "authorized", paid: false` and a `reason` ("authorised but not captured yet ... poll getPaymentStatus or wait for the order.paid webhook"); a partly paid order says so in `reason`. Poll `payments_get_status` or wait for the `order.paid` webhook, and keep auto-capture on: this library has no capture API. The signature is computed with `provider_order_id` (the id you stored at create time), never with the `razorpay_order_id` in the payload; without `provider_order_id` or `order_ref` the callback is rejected.
 
 ### Tampered or swapped payload
 
@@ -373,10 +374,10 @@ With `PAYMENTS_MODE=mock`, the result text is prefixed with `MOCK MODE: simulate
 `valid` means "authentic, and it matches your order and amount" on every gateway. It does not mean "paid": a genuine failure callback is `valid: true, paid: false, status: "failed"`. `PaymentsClient` adds **`paid`**, which is `true` only when all three hold:
 
 1. `valid` is `true`;
-2. the status is settled: `captured`, `authorized`, `refunded` or `partially_refunded`;
+2. the money is collected: status `captured` or `partially_refunded` (`authorized` is **not** paid, because this library cannot capture and uncaptured authorisations lapse; a fully `refunded` payment is **not** paid, so replaying an old success URL after a refund cannot re-fulfil);
 3. the call was bound to your order: **both** `orderRef` and `expectedAmount` were passed. (The MCP tool requires both. In the SDK, if either is missing, `paid` is `false` and `reason` says "Pass orderRef and expectedAmount to get paid=true: an unbound callback could belong to a different order.")
 
-**Fulfil only when `paid` is true**, or after a `payment.succeeded` webhook or `payments_get_status` confirms capture. On Razorpay, `authorized` counts as paid; keep auto-capture enabled.
+**Fulfil only when `paid` is true**, or after a `payment.succeeded` webhook or `payments_get_status` confirms capture. `authorized` never counts as paid: on Razorpay keep auto-capture enabled, and on Stripe do not use manual capture.
 
 ### CCAvenue (decryption)
 
@@ -397,6 +398,8 @@ Decryption is not authentication (with the classic cbc kit, AES-CBC has no MAC),
 ```json
 { "provider": "razorpay", "order_ref": "ORD_1001", "provider_order_id": "order_PbX4qJ7d2Kf9Lm" }
 ```
+
+`provider_order_id` is required for Razorpay and Stripe (also in mock mode). CCAvenue also accepts `provider_payment_id` (`reference_no`). Razorpay reports a captured instalment of a partly paid order as `pending`; Cashfree reports `refunded` / `partially_refunded` from its Get All Refunds call.
 
 ```json
 {
@@ -432,7 +435,7 @@ Decryption is not authentication (with the classic cbc kit, AES-CBC has no MAC),
 { "provider": "razorpay", "refundRef": "RF_ORD_1001_1", "providerRefundId": "rfnd_PbY1c2D3e4F5g6", "status": "processed", "amount": 10000 }
 ```
 
-Sending the identical call again returns the identical result from the idempotency store, with no second refund. Live mode is blocked unless the [double gate](#live_mutation_blocked) is satisfied:
+Sending the identical call again within the same server process (24 h) returns the identical result from the idempotency store, with no second refund. If the refund POST ends in `OUTCOME_UNKNOWN`, or the gateway rejects `refund_ref` as a duplicate (for example after a restart), the client looks the refund up by `refund_ref` and returns it when it exists (Razorpay needs `provider_payment_id`; a different amount gives `IDEMPOTENCY_CONFLICT`). PayU and CCAvenue cannot look a refund up by reference, so there the error stands: check the dashboard, and never retry with a new `refund_ref`. Razorpay, PayU, Paytm, CCAvenue and Stripe need `provider_payment_id`. Live mode is blocked unless the [double gate](#live_mutation_blocked) is satisfied:
 
 ```json
 { "provider": "razorpay", "order_ref": "ORD_1001", "refund_ref": "RF_ORD_1001_1", "provider_payment_id": "pay_PbX5aQ1zZ8Yw3T", "amount": 10000, "confirm": true }
@@ -443,6 +446,8 @@ Sending the identical call again returns the identical result from the idempoten
 ```json
 { "provider": "razorpay", "refund_ref": "RF_ORD_1001_1", "provider_refund_id": "rfnd_PbY1c2D3e4F5g6" }
 ```
+
+Ids per gateway: Razorpay `provider_refund_id` (`rfnd_…`), or `provider_payment_id` (`pay_…`) to find the refund by `refund_ref`; PayU `provider_refund_id` (the `request_id` from `payments_refund`); Cashfree and Paytm `order_ref` + `refund_ref`; PhonePe `refund_ref`; Stripe `provider_refund_id` (`re_…`) or `provider_payment_id` (`pi_`/`ch_…`); CCAvenue has no refund-status lookup.
 
 ```json
 { "provider": "razorpay", "refundRef": "RF_ORD_1001_1", "providerRefundId": "rfnd_PbY1c2D3e4F5g6", "status": "processed", "amount": 10000 }
@@ -603,7 +608,7 @@ Skydo has no API; see [skydo.md](skydo.md) for setup. Amounts are minor units of
 
 ### `payments_create_payment`, Zoho Books bridge
 
-Same arguments. Optional `provider_options`: `zohoCustomerId`, `sendEmail: true`, `dueDate` (`YYYY-MM-DD`), `exchangeRate`.
+Same arguments. Optional `provider_options`: `zohoCustomerId` (an active contact of type customer), `sendEmail: true`, `dueDate` (`YYYY-MM-DD`), `exchangeRate`. A retry returns the full existing invoice; a concurrent twin is resolved by keeping the oldest `invoice_id` and voiding only the loser. Skydo documents syncing Zoho invoices; confirm during setup that it imports API-created ones.
 
 ```json
 {
@@ -624,7 +629,7 @@ Same arguments. Optional `provider_options`: `zohoCustomerId`, `sendEmail: true`
 
 ### `payments_skydo_record_payment` (ledger mode)
 
-Only after a human has checked the receipt in the Skydo dashboard. In `live` mode the server needs `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and the call needs `confirm: true`.
+Only after a human has checked the receipt in the Skydo dashboard. `receipt_id` is required. Skydo has no sandbox, so in `sandbox` **and** `live` mode the server needs `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and the call needs `confirm: true`. `received_at`, if given, must be an ISO 8601 date not in the future.
 
 ```json
 { "order_ref": "INV_2026_041", "receipt_id": "SKY-TXN-88412", "amount_received": 124000, "fira_number": "FIRA-2026-000123", "note": "Intermediary bank deducted USD 10", "confirm": true }
@@ -649,7 +654,7 @@ Only after a human has checked the receipt in the Skydo dashboard. In `live` mod
 }
 ```
 
-Recording a further `1000` under a new `receipt_id` moves it to `captured`. Re-sending the same `receipt_id` and amount changes nothing; the same `receipt_id` with a different amount fails with `IDEMPOTENCY_CONFLICT`.
+Recording a further `1000` under a new `receipt_id` moves it to `captured`. Re-sending the same `receipt_id` and amount changes nothing; the same `receipt_id` with a different amount, or one already recorded on another order, fails with `IDEMPOTENCY_CONFLICT`. Receipt ids compare case-insensitively.
 
 ### `payments_skydo_outstanding`
 
@@ -676,7 +681,7 @@ Recording a further `1000` under a new `receipt_id` moves it to `captured`. Re-s
 { "valid": true, "paid": true, "status": "captured", "orderRef": "INV_2026_041", "providerOrderId": "skydo:INV_2026_041", "amount": 125000, "verifiedVia": "manual_record" }
 ```
 
-With the Zoho bridge, `verifiedVia` is `"status_api"` and `providerOrderId` is the Zoho invoice id; pass the stored id as `provider_order_id` (an invoice whose reference is not `order_ref` is refused). Before the money arrives the same call returns `valid: true, paid: false, status: "created"` (or `"pending"` with the balance in `reason` after a partial payment). A Zoho invoice that shows "paid" because it was written off returns `status: "failed"`.
+With the Zoho bridge, `verifiedVia` is `"status_api"` and `providerOrderId` is the Zoho invoice id; pass the stored id as `provider_order_id` (an invoice whose reference is not `order_ref` is refused). Before the money arrives the same call returns `valid: true, paid: false, status: "created"` (or `"pending"` with the balance in `reason` after a partial payment). A Zoho invoice that shows "paid" because it was fully written off returns `status: "failed"`; one partly written off after a real payment (`payment_made` > 0) returns `status: "pending"` for review. In mock mode the same `payload: {}` call works: the mock verifies Skydo by looking the order up.
 
 ### Skydo errors
 
@@ -693,8 +698,10 @@ With the Zoho bridge, `verifiedVia` is `"status_api"` and `providerOrderId` is t
 ```
 
 ```json
-{ "error": "LIVE_MUTATION_BLOCKED", "message": "Recording a Skydo receipt on skydo in LIVE mode is blocked.", "retryable": false, "provider": "skydo", "hint": "Set PAYMENTS_ALLOW_LIVE_MUTATIONS=true on the server AND pass confirm=true on the call after a human has approved it." }
+{ "error": "LIVE_MUTATION_BLOCKED", "message": "Recording a Skydo receipt on skydo is blocked: Skydo has no sandbox, so sandbox mode works on real data.", "retryable": false, "provider": "skydo", "hint": "Set PAYMENTS_ALLOW_LIVE_MUTATIONS=true on the server AND pass confirm=true on the call after a human has approved it." }
 ```
+
+In `live` mode the message is `Recording a Skydo receipt on skydo in LIVE mode is blocked.`
 
 ---
 
@@ -721,7 +728,7 @@ All errors share this envelope. Keys whose value is `undefined` are omitted.
 ```json
 {
   "error": "UNSUPPORTED",
-  "message": "skydo does not support refund. Skydo has no developer API or webhooks (checked 2026-10-29; an API is on Skydo's roadmap since Dec 2025). Skydo's FAQ says it cannot initiate a refund directly once a payment is settled; returning money is arranged outside Skydo.",
+  "message": "skydo does not support refund. Skydo has no developer API or webhooks (checked 2026-10-29; an API is on Skydo's roadmap since Dec 2025). Skydo's FAQ says it cannot initiate a refund directly for settled InstaLink payments; for anything else ask Skydo support.",
   "retryable": false,
   "provider": "skydo",
   "hint": "Call payments_get_capabilities to see what this gateway supports, or choose another gateway."

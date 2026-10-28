@@ -38,15 +38,16 @@ Which POSTs adapters mark retry-safe:
 Two layers:
 
 1. **Client layer** (`withIdempotency`, all gateways). The key is scoped as `<provider>:<operation>:<key>`, and the request is fingerprinted (stable JSON, SHA-256).
-   - `createPayment`: key = `idempotencyKey ?? orderRef`.
-   - `refund`: key = `refundRef`. **refundRef is the idempotency key.**
+   - `createPayment`: key = `idempotencyKey ?? orderRef`, kept **10 minutes**, because the cached result carries short-lived checkout data (Paytm `txnToken` lasts 15 min, PhonePe redirect URLs expire).
+   - `refund`: key = `refundRef`, kept **24 h**. **refundRef is the idempotency key.**
+   - Refund lookup: when the refund POST ends in `OUTCOME_UNKNOWN`, or the gateway rejects the `refundRef` as a duplicate, the client looks the refund up by `refundRef` (`getRefundStatus`) and returns it if it exists; a different amount gives `IDEMPOTENCY_CONFLICT`. Razorpay needs `providerPaymentId` for that lookup; Cashfree and Paytm use orderRef + refundRef, PhonePe refundRef, Stripe `providerPaymentId`. **PayU and CCAvenue cannot look a refund up by reference**, so there the original error is returned (PayU's "token already exists", error 106, is reported as `OUTCOME_UNKNOWN`).
    - Same key + same request → the stored result is returned and no gateway call is made. Same key + different request → `IDEMPOTENCY_CONFLICT`. **Failures aren't stored**, so a failed call can be retried with the same key.
-   - Records live 24 h. `MemoryIdempotencyStore` holds 10,000 entries (oldest evicted first). It's **per-process and lost on restart.**
+   - `MemoryIdempotencyStore` holds 10,000 entries (oldest evicted first). It's **per-process and lost on restart.**
 2. **Gateway layer**: the de-duplicating ids in the table above. These protect you even when the client store is cold, for example after a restart or across replicas.
 
 **Production:** implement `IdempotencyStore` (`get` / `set(key, record, ttlSeconds)`) on Redis or Postgres and pass it as `new PaymentsClient({ idempotencyStore })`. Without it, two replicas behind a load balancer don't share refund de-duplication at the client layer. On PayU and CCAvenue, where the gateway layer is also absent, that's a real double-refund window. A shared store is on the [roadmap](roadmap.md).
 
-Note: the in-memory store has a check-then-set race. Two concurrent identical calls in the same process can both miss and both execute. A Redis implementation should use `SET NX` to claim the key before calling the gateway.
+Note: within one process, concurrent identical calls share one in-flight execution. Across processes the store itself must claim atomically: a Redis implementation should use `SET NX` to claim the key before calling the gateway.
 
 ## 3. Timeouts
 
@@ -60,14 +61,14 @@ Webhooks get lost, endpoints go down and statuses change after the fact. Run rec
 
 | Job | Frequency | What |
 |---|---|---|
-| **Pending sweeper** | every 5-15 min | For orders in `created` / `pending` / `authorized` older than N minutes (and younger than the gateway's expiry), call `getPaymentStatus`. Advance state monotonically. Mark expired ones `expired` |
+| **Pending sweeper** | every 5-15 min | For orders in `created` / `pending` / `authorized` (authorised is not paid: it must become `captured`) older than N minutes (and younger than the gateway's expiry), call `getPaymentStatus`. Advance state monotonically. Mark expired ones `expired` |
 | **Refund sweeper** | hourly | For refunds in `pending`, call `getRefundStatus`. Alert on refunds pending more than 7 days, or the gateway's SLA |
 | **Daily settlement recon** | daily | `listSettlements` for yesterday (Razorpay; Stripe via payouts). Match settled amount = Σ captured − refunds − fees − tax against your ledger. Investigate mismatches. For gateways where settlements are Planned, use dashboard reports |
 | **Webhook gap check** | daily | Orders `captured` per status API with no corresponding webhook point to a broken endpoint or secret |
 
 All of these are read-only and safe to run in `live` mode without `PAYMENTS_ALLOW_LIVE_MUTATIONS`.
 
-Status API requirements: Razorpay needs `providerOrderId`, and Stripe needs the `cs_` / `pi_` id. Others look up by `orderRef`. **Persist `providerOrderId` and `providerPaymentId` next to `orderRef`.**
+Status API requirements: Razorpay needs `providerOrderId`, and Stripe needs the `cs_` / `pi_` id (mock mode enforces the same). Others look up by `orderRef`. Skydo (Zoho bridge) costs one Zoho call with `providerOrderId`, two without; Zoho Books allows 1,000 (Free) to 10,000 (Premium and above) calls per day, and a 15-minute poll costs 96 calls a day per open invoice. **Persist `providerOrderId` and `providerPaymentId` next to `orderRef`.**
 
 ## 5. Observability
 
@@ -89,7 +90,7 @@ Symptom: `createPayment` returns `OUTCOME_UNKNOWN` (or `TIMEOUT` / `NETWORK` whe
 2. For gateways keyed by your `orderRef` (Cashfree, PhonePe, Paytm, PayU, CCAvenue), call `getPaymentStatus({ orderRef })`. If the order exists, reuse it. If `NOT_FOUND`, it's safe to create with the **same** orderRef.
 3. For Stripe, retry with the same orderRef / `idempotencyKey`. The `Idempotency-Key` makes the gateway return the original Session.
 4. For Razorpay, retry with the **same** orderRef. Razorpay rejects a second order with the same `receipt` as a duplicate, and the adapter then fetches the existing order by receipt and returns it if amount and currency match (otherwise the original error is thrown). Store the returned `providerOrderId`.
-5. For Skydo with the Zoho bridge, retry with the same orderRef: the adapter finds the existing invoice by reference (and voids a duplicate created concurrently).
+5. For Skydo with the Zoho bridge, retry with the same orderRef: the adapter finds the existing invoice by reference and returns the full invoice. If a concurrent create made a twin, every process keeps the oldest `invoice_id` and voids only its own losing invoice.
 6. A client-layer replay with the same key only returns a stored result if the first call **succeeded**. Failures aren't cached, so step 2 applies.
 
 ### Playbook: UPI payment pending
@@ -120,9 +121,11 @@ Symptom: `payment.succeeded` is processed, and then the browser lands on the ret
 
 ### Playbook: refund returned an error, unclear if it happened
 
-1. Call `getRefundStatus` with the same `refundRef` (plus `providerRefundId` / `orderRef` as the gateway needs).
-2. If found, record it. If not found, retry `refund` with the **same** `refundRef`. Gateways that de-duplicate on it (Cashfree, PhonePe, Paytm, Stripe) are safe.
-3. For PayU / CCAvenue, check `getPaymentStatus().amountRefunded` and the dashboard before retrying, because gateway-side de-duplication isn't documented.
+The client already tries step 1 itself after `OUTCOME_UNKNOWN` or a duplicate rejection, where the gateway supports a lookup by `refundRef`; if that lookup succeeds you get the refund back instead of an error.
+
+1. Call `getRefundStatus` with the same `refundRef` (plus the ids the gateway needs: Razorpay `providerRefundId` or `providerPaymentId`; PayU `providerRefundId`; Cashfree/Paytm `orderRef`; Stripe `providerRefundId` or `providerPaymentId`).
+2. If found, record it. If not found, retry `refund` with the **same** `refundRef`, never a new one. Gateways that de-duplicate on it (Cashfree, PhonePe, Paytm, Stripe) are safe; Razorpay rejects the duplicate and the client then finds the existing refund.
+3. For PayU / CCAvenue, check `getPaymentStatus().amountRefunded` and the dashboard before retrying: PayU rejects a reused `token_id` (error 106, reported as `OUTCOME_UNKNOWN`) and CCAvenue a reused `refund_ref_no`, and neither can look a refund up by reference.
 
 ### Playbook: gateway outage
 

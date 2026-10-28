@@ -62,7 +62,7 @@ Webhook events normalised by this project: `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_F
 | Cashfree | Unified |
 |---|---|
 | order `ACTIVE` | `created` (or `pending` if a payment is in flight) |
-| order `PAID` | `captured` |
+| order `PAID` | `captured`; this project reads Get All Refunds for the order (`GET /pg/orders/{order_id}/refunds`) and reports `refunded` / `partially_refunded` when successful refunds cover all / part of it (a refunded order stays `PAID` on Cashfree) |
 | order `EXPIRED` | `expired` |
 | order `TERMINATED` / `TERMINATION_REQUESTED` | `cancelled` UNVERIFIED |
 | payment `SUCCESS` / `FAILED` / `PENDING` / `USER_DROPPED` / `CANCELLED` / `NOT_ATTEMPTED` | `captured` / `failed` / `pending` / `failed` / `cancelled` / `created` UNVERIFIED |
@@ -77,6 +77,7 @@ Webhook events normalised by this project: `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_F
 - Refund window 6 months. `refund_id` (our refundRef) is 3-40 chars of letters, digits, `_` and `-`, validated before the call.
 - Key-prefix checks (`TEST...`, `_test_`, `_prod_`) used by this project are a heuristic; Cashfree does not document key prefixes.
 - Pin `x-api-version`; don't copy samples written for another version.
+- This project refuses `order_meta` (return/notify URLs) and `order_splits` in `providerOptions`: set URLs through `returnUrl` / `notifyUrl`.
 
 ## Sandbox test data (UNVERIFIED in this research)
 

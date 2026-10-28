@@ -6,9 +6,9 @@ Phases are ordered by what unblocks real production use first. Items move to the
 
 ## Phase 0: foundation (done, 0.1.0)
 
-- [x] Unified types: integer paise, `orderRef`, four checkout shapes, normalized statuses and webhook events
+- [x] Unified types: integer minor units (paise for INR), `orderRef`, four checkout shapes, normalized statuses and webhook events
 - [x] Capability model with four support levels, and fail-fast `UNSUPPORTED` / `NOT_IMPLEMENTED` before any network call
-- [x] Adapters: Razorpay (full incl. customers, subscriptions, settlements), Stripe (core + customers, partial subscriptions and settlements), Cashfree, PayU, Paytm, PhonePe (core + refunds + webhooks), CCAvenue (core, partial status/refund, UNVERIFIED details flagged), Skydo (guidance only)
+- [x] Adapters: Razorpay (full incl. customers, subscriptions, settlements), Stripe (core + customers, partial subscriptions and settlements), Cashfree, PayU, Paytm, PhonePe (core + refunds + webhooks), CCAvenue (core, partial status/refund, UNVERIFIED details flagged), Skydo (capability map and guidance; the adapter followed in 0.2.0)
 - [x] Mock mode that keeps real capability maps, with signed callbacks and webhooks and a refundable-balance ledger
 - [x] Safety rails: live-mutation double gate, refundRef idempotency, client idempotency with conflict detection, audit log, redacted stderr logging
 - [x] HTTP client with timeouts, retry-safe-only retries, `Retry-After`, and error mapping
@@ -25,13 +25,15 @@ Phases are ordered by what unblocks real production use first. Items move to the
 - [x] CCAvenue AES-256-GCM kit (`CCAVENUE_ENCRYPTION=gcm`)
 - [x] Skydo: Zoho Books bridge and receiving accounts + ledger, `payments_skydo_record_payment`, `payments_skydo_outstanding` (19 tools)
 - [x] Sandbox smoke-test script (`npm run sandbox:smoke`) and stdio/HTTP end-to-end tests
+- [x] Round 3 adversarial reviews fixed: `paid` only for `captured` / `partially_refunded`; Razorpay full-payment check; per-gateway `providerOptions` guard for payments and subscriptions; refund lookup by `refundRef` after `OUTCOME_UNKNOWN` or a duplicate; Cashfree refunded states; mock mirrors real input rules; webhook dedupe on confirmed data; Skydo twin invoices, ledger lock, receipt gate in sandbox; CJS-friendly `exports` ([design-review.md](design-review.md#round-3))
 
 ## Phase 1: production hardening (next)
 
 - [ ] **Shared stores**: `RedisIdempotencyStore` (claim with `SET NX` before calling the gateway, which closes the in-process race), `RedisWebhookDedupeStore`, and Postgres equivalents. Ship as optional subpath exports so the core stays at two dependencies
 - [ ] **Out-of-band approval for live refunds**: MCP elicitation or a signed approval token, plus per-order / per-day amount caps, so `confirm=true` is no longer an honour system
-- [ ] **Refund reconciliation after `OUTCOME_UNKNOWN`**: look the refund up (e.g. Razorpay `GET /payments/{id}/refunds` matched by receipt) before re-posting
-- [ ] **HTTP transport hardening**: session expiry, DNS-rebinding allow-list
+- [x] **Refund reconciliation after `OUTCOME_UNKNOWN`**: the client looks the refund up by `refundRef` (Razorpay `GET /payments/{id}/refunds` matched by receipt; Cashfree, Paytm, PhonePe, Stripe by their refund-status lookups). PayU and CCAvenue have no lookup by reference and still need a dashboard check
+- [x] HTTP transport: idle-session eviction (30 min), session cap (1,000), exact `/mcp` path, port validation
+- [ ] **HTTP transport hardening**: DNS-rebinding allow-list
 - [ ] **OpenTelemetry**: spans per gateway call (`provider`, `op`, `status`, `attempt`) and metrics (latency, error codes, retries, blocked mutations), via an optional `telemetry` hook on `PaymentsClient`
 - [ ] **Per-tool authorization for HTTP**: read-only vs mutating tokens, so an agent deployment can be structurally unable to refund
 - [ ] **Refund rate limits**: a per-order / per-day ceiling configurable on the client

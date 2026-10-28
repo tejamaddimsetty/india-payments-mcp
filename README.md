@@ -1,8 +1,8 @@
 # india-payments-mcp
 
-One MCP server and TypeScript SDK for Indian payment gateways: **Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe and Skydo**. You get one set of tools (`payments_create_payment`, `payments_verify_payment`, `payments_refund`, ...) and one set of types. Amounts are always integer paise, every gateway's checkout is described by four shapes, and webhooks normalize to one event model. Adapters handle the per-gateway hashes, encodings and amount formats. The server tells you, and your agent, which features each gateway actually lacks instead of pretending otherwise. It's built for developers wiring up checkout, vibecoders who want an agent to do it, and AI agents that need to check payment status or issue a refund safely.
+One MCP server and TypeScript SDK for Indian payment gateways: **Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe and Skydo**. You get one set of tools (`payments_create_payment`, `payments_verify_payment`, `payments_refund`, ...) and one set of types. Amounts are always integers in the minor unit of the currency (paise for INR, cents for USD), every gateway's checkout is described by four shapes, and webhooks normalize to one event model. Adapters handle the per-gateway hashes, encodings and amount formats. The server tells you, and your agent, which features each gateway actually lacks instead of pretending otherwise. It's built for developers wiring up checkout, vibecoders who want an agent to do it, and AI agents that need to check payment status or issue a refund safely.
 
-> Status: 0.2.0. Seven gateways have API adapters. Skydo has no public API, so its adapter automates Skydo's own Zoho Books integration or hands out your receiving-account details with a ledger ([docs/skydo.md](docs/skydo.md)). Every adapter has been checked against official docs, but none has been run against a live gateway sandbox yet, and some CCAvenue details remain UNVERIFIED. See [Verification status](#verification-status). Check the per-gateway support level with `payments_get_capabilities` before relying on a feature. See [Disclaimer](#disclaimer).
+> Status: 0.2.0. Seven gateways have API adapters. Skydo has no public API, so its adapter automates Skydo's own Zoho Books integration or hands out your receiving-account details with a ledger ([docs/skydo.md](docs/skydo.md)). Every adapter has been through three independent verification rounds against official docs plus adversarial reviews (623 tests), but none has been run against a live gateway sandbox yet, and some CCAvenue details remain UNVERIFIED. See [Verification status](#verification-status). Check the per-gateway support level with `payments_get_capabilities` before relying on a feature. See [Disclaimer](#disclaimer).
 
 ---
 
@@ -93,9 +93,9 @@ For checkout types, amount units, signature schemes and onboarding notes per gat
 | `payments_recommend_gateway` | Ranks gateways for needs such as `subscriptions`, `international`, `shopify`, `exporter_collections` | read-only |
 | `payments_create_payment` | Creates an order/session and returns a `checkout` action (`js_sdk` / `redirect` / `form_post` / `manual`) | creates an order (no money moves) |
 | `payments_verify_payment` | Verifies the browser callback payload, binding it to `order_ref` and `expected_amount` (both required; pass `provider_order_id` for Razorpay). Fulfil only when `paid` is `true` | read-only (may call the status API) |
-| `payments_get_status` | Fetches the authoritative payment status from the gateway | read-only |
-| `payments_refund` | Refunds all or part of a payment. `refund_ref` is the idempotency key. Live mode needs a double gate | **moves money** |
-| `payments_get_refund_status` | Fetches refund status | read-only |
+| `payments_get_status` | Fetches the authoritative payment status from the gateway. Razorpay and Stripe need `provider_order_id` | read-only |
+| `payments_refund` | Refunds all or part of a payment. `refund_ref` is the idempotency key. Razorpay, PayU, Paytm, CCAvenue and Stripe need `provider_payment_id`. Live mode needs a double gate | **moves money** |
+| `payments_get_refund_status` | Fetches refund status (the ids each gateway needs are in the tool description; CCAvenue has none) | read-only |
 | `payments_verify_webhook` | Verifies a webhook against its raw body and normalizes it to a common event | read-only |
 | `payments_simulate_webhook` | Builds a correctly signed webhook (plus an optional curl command) for local testing. Disabled in live mode | none |
 | `payments_create_customer` | Creates a customer on gateways that have them | creates a record |
@@ -103,7 +103,7 @@ For checkout types, amount units, signature schemes and onboarding notes per gat
 | `payments_cancel_subscription` | Cancels now or at cycle end. Live mode needs a double gate | **stops billing** |
 | `payments_list_settlements` | Lists settlements for reconciliation | read-only |
 | `payments_generate_integration` | Generates server routes, client checkout, env template and test checklist for a framework | read-only (returns files) |
-| `payments_skydo_record_payment` | **Skydo ledger mode only.** Records a receipt a human has checked in the Skydo dashboard (minor units of the invoice currency). Idempotent per `receipt_id`; partial receipts keep the order `pending`. Live mode needs the double gate | **can mark an order paid** |
+| `payments_skydo_record_payment` | **Skydo ledger mode only.** Records a receipt a human has checked in the Skydo dashboard (minor units of the invoice currency). Needs `receipt_id` (idempotent per receipt) and, in sandbox and live alike (Skydo has no sandbox), the double gate with `confirm: true`; partial receipts keep the order `pending` | **can mark an order paid** |
 | `payments_skydo_outstanding` | **Skydo ledger mode.** Lists orders still waiting for money, oldest first | read-only |
 | `payments_mock_complete_payment` | **Mock mode only.** Simulates the customer paying or failing and returns a signed callback payload | mock state only |
 
@@ -117,7 +117,7 @@ That is 19 tools. The server also exposes resources (`payments://matrix`, `payme
 npm install india-payments-mcp
 ```
 
-The package is ESM-only: use `import` (or `require()` on Node 22.12+, which loads ES modules); Node 20 CommonJS code needs `await import('india-payments-mcp')`.
+The package is ES modules with a `default` export condition, so both `import` and `require('india-payments-mcp')` work on Node versions that can `require()` ES modules (20.19+ and 22.12+). On older Node 20 releases, CommonJS code needs `await import('india-payments-mcp')`.
 
 ```ts
 import express from 'express';
@@ -140,9 +140,11 @@ app.post('/api/orders', express.json(), async (req, res) => {
 });
 
 // 2. Verify what the browser sends back, bound to YOUR stored order and amount.
-//    Fulfil only when paid === true. paid is true only when the callback is genuine, the payment is
-//    captured (not just authorised, not fully refunded), AND you passed orderRef + expectedAmount (valid alone means "genuine": a genuine failure
-//    is valid too). For Razorpay also pass the order_... id you stored as providerOrderId.
+//    Fulfil only when paid === true. paid is true only when the callback is genuine, the status is
+//    captured or partially_refunded (authorized-only and fully refunded are NOT paid), AND you passed
+//    orderRef + expectedAmount. valid alone means "genuine": a genuine failure is valid too.
+//    For Razorpay also pass the order_... id you stored as providerOrderId; Razorpay reports captured
+//    only once the order is fully paid, so turn on auto-capture.
 app.post('/api/payments/verify', express.json(), async (req, res) => {
   const result = await payments.verifyPayment('razorpay', {
     orderRef: 'ORD_1001',
@@ -188,8 +190,8 @@ A complete runnable version is in [`examples/express-checkout`](examples/express
 
 Skydo (cross-border collections for Indian exporters and freelancers) has **no public developer API or webhooks**; an API has been on its roadmap since December 2025, and its Terms of Use prohibit automated access to the platform. This project never contacts Skydo. Instead the Skydo adapter automates the two paths Skydo supports:
 
-- **Zoho Books bridge** (set all six `ZOHO_*` variables): `payments_create_payment` creates a Zoho Books invoice with your order reference. Skydo's native Zoho integration imports it, and when the money arrives Skydo marks it paid and attaches the FIRA. `payments_get_status` / `payments_verify_payment` read that back.
-- **Receiving accounts + ledger** (set `SKYDO_RECEIVING_ACCOUNTS`): `payments_create_payment` returns bank-transfer instructions for your Skydo account in the client's currency, with the order reference, and tracks the payment in a local JSON ledger. You confirm each receipt with `payments_skydo_record_payment` after checking it in the Skydo dashboard. The ledger file can be shared by your app and the MCP server (file lock).
+- **Zoho Books bridge** (set all six `ZOHO_*` variables): `payments_create_payment` creates a Zoho Books invoice with your order reference. Skydo documents syncing Zoho invoices and, when the money arrives, marking them paid with the FIRA attached; whether it imports API-created invoices is not documented, so confirm it with your first invoice during setup. `payments_get_status` / `payments_verify_payment` read the invoice back.
+- **Receiving accounts + ledger** (set `SKYDO_RECEIVING_ACCOUNTS`): `payments_create_payment` returns bank-transfer instructions for your Skydo account in the client's currency, with the order reference, and tracks the payment in a local JSON ledger. You confirm each receipt with `payments_skydo_record_payment` (a `receipt_id` plus `confirm: true`) after checking it in the Skydo dashboard. The ledger file can be shared by your app and the MCP server on the same local disk (file lock).
 
 Skydo payments are foreign currency only (INR is rejected), at least USD 50 (or the equivalent), and have no refunds, webhooks, recurring payments or API payment links. Skydo documents its Zoho sync but not API-created invoices specifically, so confirm the first invoice appears in your Skydo dashboard. Setup, the full flow and troubleshooting are in **[docs/skydo.md](docs/skydo.md)**.
 
@@ -197,15 +199,15 @@ Skydo payments are foreign currency only (INR is rejected), at least USD 50 (or 
 
 ## Verification status
 
-- Every adapter was checked line by line against the gateway's official documentation in two independent rounds. The reports, with the doc URL behind each check and the fixes they caused, are in [docs/research/verification](docs/research/verification). The Skydo API search is in [skydo-api-search.md](docs/research/verification/skydo-api-search.md).
-- **No adapter has been run against a live gateway sandbox yet.** Tests use recorded request/response shapes from the docs. `npm run sandbox:smoke` (see `scripts/sandbox-smoke.ts`) creates small unpaid orders against the sandboxes of the gateways you have test keys for; results from contributors are welcome.
+- Three independent verification rounds against official docs, plus adversarial reviews of the money-safety rules and the Skydo bridge; 623 tests. The reports, with the doc URL behind each check and the fixes they caused, are in [docs/research/verification](docs/research/verification) (round 3: [round3-project.md](docs/research/verification/round3-project.md), [round3-skydo.md](docs/research/verification/round3-skydo.md)); the summary is in [docs/design-review.md](docs/design-review.md#round-3). The Skydo API search is in [skydo-api-search.md](docs/research/verification/skydo-api-search.md).
+- **Not yet run against live gateway sandboxes.** Tests use recorded request/response shapes from the docs. `npm run sandbox:smoke` (see `scripts/sandbox-smoke.ts`) creates small unpaid orders against the sandboxes of the gateways you have test keys for; results from contributors are welcome.
 - Facts the docs do not settle are marked in the capability notes (`UNVERIFIED`, "confirm in sandbox"). CCAvenue publishes no public API reference, so its status and refund calls rely on integration kits and third-party implementations.
 
 ---
 
 ## Claude Skill and ChatGPT kit
 
-- **Claude Skill**: [`skills/india-payments/SKILL.md`](skills/india-payments/SKILL.md). It teaches Claude the integration workflow (capabilities first, paise, verify before fulfil, raw-body webhooks, human approval for refunds). Install it alongside the MCP server.
+- **Claude Skill**: [`skills/india-payments/SKILL.md`](skills/india-payments/SKILL.md). It teaches Claude the integration workflow (capabilities first, integer minor units, verify before fulfil, raw-body webhooks, human approval for refunds). Install it alongside the MCP server.
 - **ChatGPT**: [`chatgpt/custom-gpt-instructions.md`](chatgpt/custom-gpt-instructions.md) covers a Custom GPT / connector setup. ChatGPT connectors need a remote server, so run `india-payments-mcp http` behind TLS. See [deployment](docs/architecture.md#k-deployment).
 - **Other agents**: [`AGENTS.md`](AGENTS.md) holds conventions for coding agents working in this repo.
 
@@ -215,25 +217,25 @@ Skydo payments are foreign currency only (INR is rejected), at least USD 50 (or 
 
 | Mode | Network | Credentials | Use it for |
 |---|---|---|---|
-| `mock` | none | none | Learning the API, demos, CI, agent experiments. Keeps each gateway's real capability map, so unsupported features fail the same way they would for real. Callbacks and webhooks are HMAC-signed with a fixed mock secret, so tampering is still detected |
+| `mock` | none | none | Learning the API, demos, CI, agent experiments. Keeps each gateway's real capability map and mirrors its input rules (ids such as `provider_order_id` / `provider_payment_id` where the real gateway needs them, INR only on PayU/Paytm/PhonePe, duplicate-refund behaviour, refused webhook simulations), so a call that would fail against the real gateway fails in mock too. Skydo, Cashfree, PhonePe and Stripe verify by status lookup, as in real mode. Callbacks and webhooks are HMAC-signed with a fixed mock secret, so tampering is still detected |
 | `sandbox` (default) | gateway test hosts | test keys | Integration testing against real gateway behaviour |
 | `live` | gateway production hosts | live keys | Real money. Refunds and cancellations are double-gated (see below) |
 
-Set the mode with `PAYMENTS_MODE`. Adapters cross-check key prefixes where the gateway has them. For example, the Razorpay adapter refuses `rzp_live_` keys in sandbox and `rzp_test_` keys in live. Skydo is the exception: it has no sandbox, so with the `ZOHO_*` variables set, `sandbox` creates real Zoho Books invoices. Use `mock` to try Skydo.
+Set the mode with `PAYMENTS_MODE`. Adapters cross-check key prefixes where the gateway has them. For example, the Razorpay adapter refuses `rzp_live_` keys in sandbox and `rzp_test_` keys in live. Skydo is the exception: it has no sandbox, so `sandbox` works on real data (with the `ZOHO_*` variables set it creates real Zoho Books invoices, and the ledger is your real ledger). Receipt recording is therefore gated in `sandbox` as well as `live`. Use `mock` to try Skydo.
 
 ---
 
 ## Safety rails
 
-- **Live mutations are double-gated in the MCP server.** In `live` mode, `payments_refund`, `payments_cancel_subscription` and `payments_skydo_record_payment` fail with `LIVE_MUTATION_BLOCKED` unless the server runs with `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` **and** the call passes `confirm: true`. Agents are told to get human approval before setting `confirm`. The gate is on because the MCP server creates its client with `guardLiveMutations: true`; SDK users, whose apps have their own authorisation, are not gated unless they pass that option. Webhook simulation is disabled in live mode.
-- **Refunds are idempotent by `refund_ref`.** The same `refund_ref` with the same request returns the stored result. The same `refund_ref` with a different request fails with `IDEMPOTENCY_CONFLICT`.
-- **Order creation is idempotent by `idempotency_key`** (default: `order_ref`).
+- **Live mutations are double-gated in the MCP server.** In `live` mode, `payments_refund`, `payments_cancel_subscription` and `payments_skydo_record_payment` (for Skydo also in `sandbox`, since Skydo has no sandbox) fail with `LIVE_MUTATION_BLOCKED` unless the server runs with `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` **and** the call passes `confirm: true`. Agents are told to get human approval before setting `confirm`. The gate is on because the MCP server creates its client with `guardLiveMutations: true`; SDK users, whose apps have their own authorisation, are not gated unless they pass that option. Webhook simulation is disabled in live mode.
+- **Refunds are idempotent by `refund_ref`.** Within one process (the default idempotency cache is in memory, 24 h for refunds) the same `refund_ref` with the same request returns the stored result, and with a different request fails with `IDEMPOTENCY_CONFLICT`. When a refund ends in `OUTCOME_UNKNOWN`, or the gateway rejects the `refund_ref` as a duplicate, the client looks the refund up by `refund_ref` and returns it if it exists (Razorpay needs `provider_payment_id` for that lookup). PayU and CCAvenue have no lookup by `refund_ref`, so there the error stands: check the dashboard before retrying, and never retry with a new `refund_ref`. Across restarts, pass a shared `idempotencyStore`.
+- **Order creation is idempotent by `idempotency_key`** (default: `order_ref`) for 10 minutes in process, because cached results carry short-lived checkout data (Paytm `txnToken`, PhonePe redirect URL).
 - **Money-moving POSTs are never retried blindly.** Only GETs and requests the gateway de-duplicates are retried. When a non-retry-safe request times out or gets a 5xx, the error is `OUTCOME_UNKNOWN`: it may or may not have happened, so look the payment or refund up before retrying.
 - **Verification binds to your order.** `paid` is `true` only when the callback is genuine, the money is collected (`captured` or `partially_refunded`; `authorized`-only and fully `refunded` payments are not paid) **and** you passed both `order_ref` and `expected_amount`. A valid signature for a different order or amount is rejected. For Razorpay, pass the `order_…` id you stored as `provider_order_id`.
-- **`provider_options` cannot override core fields.** Keys that carry the amount, currency, order id, credentials, hashes or redirect URLs on any gateway (for example `amount`, `key`, `hash`, `surl`, `order_id`, `merchantUrls`, `success_url`, `line_items`) are rejected with `VALIDATION`.
+- **`provider_options` cannot override core fields or route money.** A baseline list (amount, currency, order id, credentials, hashes, redirect URLs: for example `amount`, `key`, `hash`, `surl`, `order_id`, `merchantUrls`, `success_url`, `line_items`) plus each gateway's own list for payments and subscriptions (splits, transfers, connected accounts, manual capture, partial payments, binding keys such as Stripe `metadata` and Razorpay subscription `notes`) is rejected with `VALIDATION` before any network call. The per-gateway lists are in [docs/security.md](docs/security.md#provider_options-guard). `metadata` cannot override the `order_ref` binding key.
 - **Secrets never leave the server.** `check_config` reports env var *names* only. Logs (stderr, JSON) and the audit log redact secret-looking keys. Checkout options contain only publishable values.
 - **Audit trail.** Set `PAYMENTS_AUDIT_LOG` to append every create, refund, subscription and Skydo receipt action, including blocked ones, as JSON Lines.
-- **HTTP transport requires a bearer token** (`MCP_HTTP_TOKEN`, 24+ chars) and binds to `127.0.0.1` by default.
+- **HTTP transport requires a bearer token** (`MCP_HTTP_TOKEN`, 24+ chars) and binds to `127.0.0.1` by default. It serves the exact path `/mcp` (plus public `/healthz`), validates `MCP_HTTP_PORT`, evicts sessions idle for 30 minutes and refuses new sessions beyond 1,000 (HTTP 503).
 
 Details, PCI-DSS scope and the threat model for agents are in [docs/security.md](docs/security.md).
 

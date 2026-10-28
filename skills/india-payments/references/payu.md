@@ -81,7 +81,8 @@ With split payments the response hash uses `status|splitInfo||||||` instead of `
 - surl/furl receive a cross-site POST: SameSite=Lax session cookies are not sent. Look the attempt up by `txnid`, not by session.
 - Webhook body format: docs disagree (JSON vs form-urlencoded). Accept both and verify the same reverse hash. PARTIAL. This project parses payment webhooks only; poll refund status instead of relying on refund webhooks.
 - `txnid` max 25 chars; nothing in the key tells test from live, so make sure `PAYMENTS_MODE` matches the key.
-- PayU rejects a reused refund token (error 106 "Token already exists") instead of returning the earlier refund: on `OUTCOME_UNKNOWN`, check refund status before retrying, and retry with a NEW refundRef. error_code 102 (queued) counts as accepted.
+- PayU rejects a reused refund token (error 106 "Token already exists") instead of returning the earlier refund, and has no lookup by token: the earlier refund most likely exists. This project reports error 106 as `OUTCOME_UNKNOWN`. After `OUTCOME_UNKNOWN`, find the earlier refund's `request_id` (dashboard or logs) and check it with refund status; never retry with a new refundRef until you know the first one failed. error_code 102 (queued) counts as accepted.
+- `unmappedstatus` is not covered by the response hash: this project lets it only downgrade the hashed `status` (to `authorized` / `cancelled`). On auth-and-capture accounts, confirm with `verify_payment` before fulfilling. `authorized` is never `paid` here.
 - Test-mode webhooks fire only for test transactions.
 - Subscriptions: Standing Instructions (`si=1`, `si_details`) and mandate APIs exist. UNVERIFIED
 

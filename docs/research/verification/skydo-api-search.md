@@ -1,5 +1,7 @@
 # Skydo developer API: exhaustive re-verification
 
+> **Correction (2026-10-29, round 3).** The first version of this report cited Skydo's Terms of Use by section numbers that do not exist in the published Terms (version of 09 Apr 2026), which are a single numbered list. Re-checked against the live HTML in [round3-skydo.md](round3-skydo.md): the scraping/robots ban is **clause 13(iv)(f)** ("Restrictions on the use of the Platform"), and the partner framework is **clause 11** ("Third-party applications"). The reverse-engineering ban is the "decompile, reverse engineer" item of clause 13 together with the intellectual-property clause. The references below have been changed to these clause names; the findings themselves are unchanged.
+
 - **Checked:** 2026-10-29. HTTP probes were run 2026-10-28 19:46–19:53 UTC.
 - **Method:** I checked the live site and its sitemaps, `llms.txt`, the CMS JSON embedded in the FAQ pages (which carries full answers, not only titles), a DNS and subdomain sweep, GitHub (users, orgs, code and repo search), package registries, automation and app marketplaces, web search and third-party comparisons.
 - **Scope:** Read-only. I did not log in to any Skydo dashboard and did not send authenticated requests.
@@ -12,7 +14,7 @@
 - **Website checkout is ruled out by Skydo itself.** Skydo's own FAQ, asked "Can I integrate Skydo on my website for checkout?", answers "Currently, this feature is not available."
 - **The API is on the roadmap with no date.** The Series A post (10 Dec 2025) says: "Developer Platform: To support SaaS companies, marketplaces, and fintech partners, we will roll out developer-friendly APIs and webhooks." No timeline is given.
 - **Nothing has launched since.** A Skydo blog post dated 27 Oct 2026 still names Zoho as the only automation path.
-- **Partner integrations exist, but only on Skydo's terms.** Terms of Use §21 has a "Third Party Business Application" framework: connections approved by Skydo can send payment requests and receive payment-status notifications. The Zoho Books integration and the Amazon PSP route are instances of it. This shows a private, Skydo-approved partner integration channel exists. There is no public evidence that it can be obtained "on request", and no "contact us for API access" CTA appears anywhere on the site.
+- **Partner integrations exist, but only on Skydo's terms.** Terms of Use clause 11 ("Third-party applications") has a Skydo-approved application framework: connections approved by Skydo can send payment requests and receive payment-status notifications. The Zoho Books integration and the Amazon PSP route are instances of it. This shows a private, Skydo-approved partner integration channel exists. There is no public evidence that it can be obtained "on request", and no "contact us for API access" CTA appears anywhere on the site.
 - **Infrastructure exists but is not public.**
   - `developer.skydo.com` resolves to an empty CloudFront/S3 distribution: 404 at the root, and every extension-less path just gets a trailing-slash 301.
   - `api.skydo.com` is the dashboard's own backend. It answers "All is well!! V4" at the root and 403 on every path.
@@ -48,16 +50,16 @@
 | https://www.skydo.com/sitemaps/people-ask.xml | 200. No Skydo API or webhook Q&A. Only third-party (PayPal/Stripe) "link"/"integrate" questions |
 | https://www.skydo.com/llms.txt | 200. Product list (local accounts, FIRA, dashboard "to track, invoice, and manage payments"). **No API mention** |
 | https://www.skydo.com/faqs | 200. Categories: Payments, Fees, International accounts, Dashboard, InstaLinks |
-| https://www.skydo.com/faqs/dashboard | 200. Includes "Can I integrate Skydo on my website for checkout?" → "Currently, this feature is not available." Full answers extracted from the embedded CMS JSON; see §2 |
-| https://www.skydo.com/faqs/instalinks | 200. Answers in §2. No API mention |
-| https://www.skydo.com/faqs/international-accounts | 200. Countries list in §2. No API mention |
+| https://www.skydo.com/faqs/dashboard | 200. Includes "Can I integrate Skydo on my website for checkout?" → "Currently, this feature is not available." Full answers extracted from the embedded CMS JSON; see section 2 |
+| https://www.skydo.com/faqs/instalinks | 200. Answers in section 2. No API mention |
+| https://www.skydo.com/faqs/international-accounts | 200. Countries list in section 2. No API mention |
 | https://www.skydo.com/faqs/payments, /faqs/fees | 200. No mention of API, webhook, Zoho, CSV, Excel, Tally, QuickBooks or Xero (grep over raw HTML and JSON) |
 | https://www.skydo.com/contact-us/sales | 200. No API, integration or developer wording |
 | https://www.skydo.com/us (and /payouts → 308 → /us) | 200. US→India contractor payouts: "Bulk upload via file", batches, recurring. **No API mention** |
-| https://www.skydo.com/terms-of-use | 200. §21 "Third Party Business Application" (Skydo-approved connections only). §25.8.12 bans "deep-links, page-scrape, robot, spider or other automatic device". §25.8.2 and §37.6 ban reverse engineering |
+| https://www.skydo.com/terms-of-use | 200. Clause 11 "Third-party applications" (Skydo-approved connections only). Clause 13(iv)(f) bans "deep-links, page-scrape, robot, spider or other automatic device". Clause 13's "decompile, reverse engineer" item and the intellectual-property clause ban reverse engineering |
 | https://www.skydo.com/blog/skydo-series-a-funding-announcement | 200. **"we will roll out developer-friendly APIs and webhooks"** (roadmap, undated). Also "By opening up our APIs…" |
 | https://www.skydo.com/blog/category/whats-new-with-skydo | 200. 9 product posts (EDF generator, signup, Series A, Zoho integration, invoices and so on). **None announce an API or webhooks** |
-| https://www.skydo.com/blog/skydo-feature-update-zoho-integration | 200. Zoho sync details in §2 |
+| https://www.skydo.com/blog/skydo-feature-update-zoho-integration | 200. Zoho sync details in section 2 |
 | https://www.skydo.com/blog/a-quick-guide-to-using-the-skydo-platform | 200. Dashboard tour (invoices, reminders, ledger, FIRA, analytics). No API |
 | https://www.skydo.com/blog/match-fira-to-invoice-automatically | 200, dated **27 Oct 2026**. Automation = auto-FIRA plus the Zoho integration only. Also says FIRA is "available in your inbox and Skydo dashboard" |
 | https://www.skydo.com/blog/how-to-reconcile-export-payments-in-quickbooks (also /xero, /tally, /sap, /oracle-netsuite, /microsoft-dynamics) | 200. Generic manual reconciliation guides. No native connector |
@@ -174,7 +176,7 @@ Facts below come from FAQ answers extracted from the CMS JSON embedded in `/faqs
 
 - **On receipt into the local account:** email and WhatsApp, at every step ("How will I be notified…" FAQ).
 - **InstaLinks:** email on authorisation and again on success or failure.
-- **Per-transaction confirmation email:** confirmed by the Veem T&C §3.9.
+- **Per-transaction confirmation email:** confirmed by the Veem T&C clause 3.9.
 - **FIRA:** delivered "in your inbox" as well as on the dashboard.
 
 ### Exports
@@ -187,7 +189,7 @@ Facts below come from FAQ answers extracted from the CMS JSON embedded in `/faqs
 
 ### Terms-of-use constraints
 
-- §25.8.12 forbids scraping, robots and "deep-links" against the platform. §25.8.2 and §37.6 forbid reverse engineering.
+- Clause 13(iv)(f) forbids scraping, robots and "deep-links" against the platform. Clause 13's "decompile, reverse engineer" item and the intellectual-property clause forbid reverse engineering.
 - **The MCP must not drive the dashboard or call `api.skydo.com`.**
 - **Permitted inputs:** files and emails the user already receives, and public APIs of connected tools such as Zoho.
 
@@ -218,5 +220,5 @@ Facts below come from FAQ answers extracted from the CMS JSON embedded in `/faqs
    - If used, label it as indicative, cache it, and prefer a neutral FX source. Do not present it as a Skydo API.
 7. **Watch for the real API.**
    - Monitor `developer.skydo.com` (an empty CloudFront distribution today) and the "What's new" blog category.
-   - Optionally ask Skydo support or partnerships (support@skydo.com; the Partnerships Manager is named on the blog) whether early or partner access exists under Terms §21.
+   - Optionally ask Skydo support or partnerships (support@skydo.com; the Partnerships Manager is named on the blog) whether early or partner access exists under Terms clause 11 ("Third-party applications").
    - Until then, there is no evidence that it is available on request.

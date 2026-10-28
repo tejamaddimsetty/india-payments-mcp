@@ -59,7 +59,7 @@ export function ccavDecrypt(hex: string, workingKey: string) {
 | Purpose | command | encrypted JSON | Status |
 |---|---|---|---|
 | Status | `orderStatusTracker` | `{order_no, reference_no}` (Meta guide shows `orderNo`/`referenceNo`) | UNVERIFIED |
-| Refund | `refundOrder` | `{reference_no, refund_amount, refund_ref_no}` (`reference_no` = CCAvenue `tracking_id`). A repeated `refund_ref_no` is rejected, not de-duplicated; staging reportedly accepts one refund per order | UNVERIFIED |
+| Refund | `refundOrder` | `{reference_no, refund_amount, refund_ref_no}` (`reference_no` = CCAvenue `tracking_id`). A repeated `refund_ref_no` is rejected, not de-duplicated; staging reportedly accepts one refund per order. No lookup by `refund_ref_no` exists, so after a timeout or a duplicate rejection check the order in the dashboard before retrying with a new ref | UNVERIFIED |
 | Refund details | `getRefundDetails` | `{reference_no}` → `refund_list[]` with `refund_status` `TS-REFA`/`TS-REFC`/`TS-REFF`/`TS-REFD` (Odoo). Not implemented in this project | UNVERIFIED |
 
 ## Status mapping

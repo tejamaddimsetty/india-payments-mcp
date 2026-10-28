@@ -21,20 +21,20 @@ PAYMENTS_MODE=mock npm run dev
 
 What `MockGateway` does (`src/mock/mock-gateway.ts`):
 
-- **Keeps each gateway's real capability map.** `payments_create_customer` on PhonePe fails with `UNSUPPORTED` in mock mode exactly as it would in production, and so does a Skydo refund. Skydo's currency rules (no INR, USD 50 minimum) are enforced in mock mode too; `payments_skydo_record_payment` and `payments_skydo_outstanding` are not available in mock mode, so simulate Skydo payments with `payments_mock_complete_payment`.
+- **Keeps each gateway's real capability map and input rules.** `payments_create_customer` on PhonePe fails with `UNSUPPORTED` in mock mode exactly as it would in production, and so does a Skydo refund. Like the real adapters, the mock requires `provider_order_id` for status on Razorpay and Stripe, requires `provider_payment_id` for refunds on Razorpay, Stripe, PayU, Paytm and CCAvenue, accepts INR only on PayU, Paytm and PhonePe, and refuses the webhook simulations the real adapter refuses (PayU and CCAvenue `refund.processed`). Skydo's currency rules (no INR, USD 50 minimum) are enforced in mock mode too; `payments_skydo_record_payment` and `payments_skydo_outstanding` are not available in mock mode, so simulate Skydo payments with `payments_mock_complete_payment`.
 - Keeps state in one `MockLedger` per `PaymentsClient`, shared across MCP tool calls. State is in memory and lost when the process exits.
-- `createPayment` returns a `manual` checkout. The customer is simulated with `payments_mock_complete_payment` (`outcome: success | failure`, `method` default `upi`), which returns a callback payload **HMAC-signed** with a fixed mock secret. `verifyPayment` rejects tampered fields, orderRef mismatches and amount mismatches.
-- Refunds enforce the refundable balance, move status to `partially_refunded` / `refunded`, and de-duplicate by `refundRef`.
-- `simulateWebhook` emits a normalized event signed with `x-mock-signature`. `listSettlements` returns one settlement of captured volume minus a flat 2% "fee".
+- `createPayment` returns a `manual` checkout. The customer is simulated with `payments_mock_complete_payment` (`outcome: success | failure`, `method` default `upi`), which returns a callback payload **HMAC-signed** with a random per-process mock secret. `verifyPayment` rejects tampered fields, orderRef mismatches and amount mismatches. For Skydo, Cashfree, PhonePe and Stripe, whose real verify is a status lookup, `verifyPayment` with `payload: {}` looks the order up by `order_ref` instead.
+- Refunds enforce the refundable balance and move status to `partially_refunded` / `refunded`. A reused `refundRef` follows the real gateway: Razorpay, PayU and CCAvenue reject it as a duplicate (the client then looks the refund up where the real gateway can), the others return the earlier refund.
+- `simulateWebhook` emits a normalized event signed with `x-mock-signature`. `listSettlements` returns one settlement per currency of that provider's captured volume minus a flat 2% "fee".
 - Re-using an `orderRef` with **the same** request returns the cached result (client idempotency). With a **different** request it fails with `IDEMPOTENCY_CONFLICT`.
 
 What mock mode does **not** test: real hashes and encodings, gateway validation rules (minimum amounts, field lengths beyond our own orderRef check), timing, or async states such as UPI `pending`. Use sandbox for those.
 
 A typical agent smoke test, in plain language:
 
-> Create a Rs 1 PayU payment for T_001 with return URL https://example.com/r → complete it successfully → verify it with expected amount 100 → refund it fully with refund ref RF_T_001 → refund again with the same ref → get refund status.
+> Create a Rs 1 PayU payment for T_001 with return URL https://example.com/r → complete it successfully → verify it with expected amount 100 → refund it fully with refund ref RF_T_001 and the provider payment id from the verify result → refund again with the same ref → get refund status.
 
-Every step should succeed, and the second refund should return the first refund's result.
+Every step should succeed, and the second refund should return the first refund's result from the in-process idempotency cache.
 
 ## 2. Sandbox setup per gateway
 
@@ -42,14 +42,14 @@ Where to get test credentials, and what to test with. **Test instruments are mar
 
 | Gateway | Test keys | Test instruments (check the gateway's docs) | Gotchas |
 |---|---|---|---|
-| Razorpay | Dashboard → switch to **Test Mode** → Account & Settings → API Keys (`rzp_test_…`). Webhook secret: set when you create a test webhook | Razorpay publishes test cards and UPI ids on its "Test Card Details" / "Test UPI" pages. Commonly cited: UPI `success@razorpay` / `failure@razorpay` (UNVERIFIED here) | Enable auto-capture in test mode too, or payments stay `authorized` |
+| Razorpay | Dashboard → switch to **Test Mode** → Account & Settings → API Keys (`rzp_test_…`). Webhook secret: set when you create a test webhook | Razorpay publishes test cards and UPI ids on its "Test Card Details" / "Test UPI" pages. Commonly cited: UPI `success@razorpay` / `failure@razorpay` (UNVERIFIED here) | Enable auto-capture in test mode too, or payments stay `authorized` and `paid` stays `false` |
 | PayU | Dashboard → test mode → Developers → Key & Salt. Test and live keys look identical | PayU docs list test cards/UPI under "Test Cards, UPI ID and Wallets" (UNVERIFIED here) | `surl`/`furl` must accept POST. Test webhooks fire only for test transactions |
 | Cashfree | Sandbox dashboard (merchant.cashfree.com, sandbox toggle) → Developers → API Keys | Cashfree docs have a "Test data" page with cards, UPI and netbanking (UNVERIFIED here) | **Whitelist your checkout domain** in the sandbox too (`localhost` handling is gateway-defined; use a tunnel if it's refused). Webhook timestamps must be fresh |
 | CCAvenue | Ask CCAvenue support to enable a test/staging account. Credentials are in M.A.R.S. → Settings → API Keys | Provided by CCAvenue with test access (UNVERIFIED) | **Whitelist your server IP** for status/refund APIs. The access code is bound to the registered domain. Confirm the encryption kit (CBC vs GCM) |
 | Paytm | paytmpayments.com dashboard → Developer Settings → API Keys (test MID + 16-char key). Website `WEBSTAGING` | Paytm docs provide staging test wallet/card credentials (UNVERIFIED here) | Hosts were rebranded to `*.paytmpayments.com`. `txnToken` lasts 15 min. Business errors return HTTP 200 |
 | PhonePe | Sandbox `client_id` / `client_secret` / `client_version` come from the **PhonePe integration team**. Production comes from the Business Dashboard | PhonePe documents a sandbox PayPage/simulator flow (UNVERIFIED here) | Ask the integration team to configure the sandbox webhook URL and credentials. Minimum 100 paise |
 | Stripe | Dashboard → Developers → API keys (`sk_test_…`, `pk_test_…`). Requires an existing (invited) account for India | Stripe's testing page lists `4242 4242 4242 4242` and India-specific cards (Stripe docs; not re-verified here) | `stripe listen --forward-to localhost:3000/webhooks/stripe` prints a test `whsec_` |
-| Skydo | No Skydo sandbox. Zoho bridge: use a Zoho Books organisation that is **not** connected to Skydo (with `ZOHO_*` set, `sandbox` mode creates real invoices). Ledger mode: any `SKYDO_RECEIVING_ACCOUNTS` and a scratch `SKYDO_LEDGER_FILE` | n/a | See [skydo.md](skydo.md). Confirm once, with one real invoice, that Skydo imports API-created Zoho invoices |
+| Skydo | No Skydo sandbox. Zoho bridge: use a Zoho Books organisation that is **not** connected to Skydo (with `ZOHO_*` set, `sandbox` mode creates real invoices). Ledger mode: any `SKYDO_RECEIVING_ACCOUNTS` and a scratch `SKYDO_LEDGER_FILE` on a local disk. Through MCP, recording a receipt needs `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and `confirm: true` in sandbox too | n/a | See [skydo.md](skydo.md). Confirm once, with one real invoice, that Skydo imports API-created Zoho invoices |
 
 After configuring, run:
 

@@ -9,6 +9,10 @@ gateway ──POST──► your endpoint (raw body!) ──► client.parseWebh
                                                    │  verify signature / auth (adapter)
                                                    │  normalize -> NormalizedWebhookEvent
                                                    ▼
+                                     bodyAuthenticated: false (PhonePe, CCAvenue)?
+                                                   │  -> getPaymentStatus; type, status, amount and
+                                                   │     event.id rebuilt from the CONFIRMED data
+                                                   ▼
                                      createWebhookHandler: dedupe.claim(provider:event.id)
                                                    │  duplicate -> 200 {duplicate:true}
                                                    ▼
@@ -29,15 +33,17 @@ gateway ──POST──► your endpoint (raw body!) ──► client.parseWebh
 | Stripe | `Stripe-Signature: t=..,v1=..`. HMAC-SHA256(`t + "." + raw body`), compared with **every** `v1` | `STRIPE_WEBHOOK_SECRET` (`whsec_…`) | JSON | `evt_…` | 300 s tolerance. Payloads use the endpoint's API version |
 | PayU | Reverse SHA-512 hash in the body (same scheme as the surl/furl callback) | `PAYU_MERCHANT_SALT` | form-encoded **or** JSON (both accepted) | `mihpayid:status` | Payment events only. Refund webhooks aren't parsed, so poll refund status |
 | Paytm | Payments: `CHECKSUMHASH` field (Paytm checksum over sorted values); `MID` must match. Refunds: `head.signature` over the JSON `body` | `PAYTM_MERCHANT_KEY` | form-encoded (payments), JSON `{head, body}` (refunds) | `TXNID:STATUS`, or `refund:REFID:<stage>` | The URL is set in the Paytm dashboard. The documented unsigned FAILED refund notification is rejected: poll refund status for those |
-| PhonePe | `Authorization` header = hex SHA-256(`username:password`) | `PHONEPE_WEBHOOK_USERNAME` / `_PASSWORD` | JSON | `event:orderId\|refundId:state` | **Doesn't authenticate the body.** Always re-check with `payments_get_status` before acting |
-| CCAvenue | Successful AES decryption of `encResp` with the working key (no signature exists; the cbc kit has no MAC, the gcm kit's tag authenticates) | `CCAVENUE_WORKING_KEY` | form-encoded (`encResp=...`) | `tracking_id:order_status` | Order Status events only. `bodyAuthenticated: false`; `createWebhookHandler` confirms with status |
+| PhonePe | `Authorization` header = hex SHA-256(`username:password`) | `PHONEPE_WEBHOOK_USERNAME` / `_PASSWORD` | JSON | `event:orderId\|refundId:state` from the body; `createWebhookHandler` replaces it with `confirmed:<orderRef>:<status>:<paymentId>` | **Doesn't authenticate the body.** Always re-check with `payments_get_status` before acting (`createWebhookHandler` does) |
+| CCAvenue | Successful AES decryption of `encResp` with the working key (no signature exists; the cbc kit has no MAC, the gcm kit's tag authenticates) | `CCAVENUE_WORKING_KEY` | form-encoded (`encResp=...`) | `tracking_id:order_status` from the body; `createWebhookHandler` replaces it with `confirmed:<orderRef>:<status>:<paymentId>` | Order Status events only. `bodyAuthenticated: false`; `createWebhookHandler` confirms with status |
 | Skydo | n/a | n/a | n/a | n/a | Skydo has no webhooks; `payments_verify_webhook` returns `UNSUPPORTED`. Poll `payments_get_status` (Zoho bridge) or record receipts (ledger mode). See [skydo.md](skydo.md) |
 
 A bad signature always throws `SIGNATURE_INVALID`. A missing webhook secret throws `CONFIG_MISSING`. `createWebhookHandler` maps both `SIGNATURE_INVALID` and `VALIDATION` to HTTP 400, so the gateway stops retrying a request that can never succeed. Everything else becomes 500.
 
 ### Gateways where the webhook alone isn't proof
 
-For **PhonePe** (static header, body unsigned) and **CCAvenue** (no signature, only decryption), anyone holding the shared secret, or anyone who can replay an old `encResp`, can deliver a well-formed event. Treat these events as a *trigger* to call `payments_get_status`, and fulfil based on the status result:
+For **PhonePe** (static header, body unsigned) and **CCAvenue** (no signature, only decryption), anyone holding the shared secret, or anyone who can replay an old `encResp`, can deliver a well-formed event. Treat these events as a *trigger* to call `payments_get_status`, and fulfil based on the status result.
+
+`createWebhookHandler` does this for you: it calls `getPaymentStatus`, recomputes `type`, `status` and `amount` from the confirmed result, and **dedupes on the confirmed data** (order ref + confirmed status + payment id), never on the id built from the unauthenticated body. Otherwise a forged delivery could claim the id a genuine later event will carry and get that event dropped as a duplicate. With `payments_verify_webhook` or `parseWebhook` directly, do it yourself:
 
 ```ts
 onEvent: async (e) => {
@@ -55,7 +61,7 @@ That pattern is cheap and correct for **every** gateway. Use it everywhere if yo
 
 | `type` | Meaning | Mapped from (examples) |
 |---|---|---|
-| `payment.succeeded` | Money captured | Razorpay `payment.captured`, `order.paid`. Stripe `payment_intent.succeeded`, `checkout.session.completed` (paid). PhonePe `checkout.order.completed`. Cashfree success. PayU / Paytm / CCAvenue success status |
+| `payment.succeeded` | Money captured (status `captured` or `partially_refunded`; a confirmed fully `refunded` status maps to `unknown`, never to a success to fulfil) | Razorpay `payment.captured`, `order.paid`. Stripe `payment_intent.succeeded`, `checkout.session.completed` (paid). PhonePe `checkout.order.completed`. Cashfree success. PayU / Paytm / CCAvenue success status |
 | `payment.failed` | Attempt failed or cancelled | Razorpay `payment.failed`. Stripe `payment_intent.payment_failed`, `payment_intent.canceled`. PhonePe `checkout.order.failed` |
 | `payment.pending` | In flight (UPI collect, bank processing) | Stripe `payment_intent.processing`. Pending statuses elsewhere |
 | `payment.authorized` | Authorised, not captured | Razorpay `payment.authorized`. Stripe `payment_intent.amount_capturable_updated` |
@@ -64,6 +70,8 @@ That pattern is cheap and correct for **every** gateway. Use it everywhere if yo
 | `dispute.created` | Chargeback opened | Razorpay `payment.dispute.created`. Cashfree dispute events |
 | `settlement.processed` | Payout to your bank | Razorpay `settlement.processed` |
 | `unknown` | Verified, but not mapped | Anything else. `providerEventType` and `raw` carry the original |
+
+Refund events (`refund.*`) describe the refund in `type`. Their `status` is the **payment's** status and is set only when the event itself can tell a full refund from a partial one (Razorpay: the payment entity; Paytm: `totalRefundAmount` vs `txnAmount`), as `refunded` / `partially_refunded`. Otherwise (Cashfree, PhonePe, Stripe, mock) it is undefined: call `payments_get_status` for the payment's state.
 
 An `unknown` event has **still passed verification**. Return 200 and log it. Don't 4xx it, or the gateway retries forever.
 
@@ -137,10 +145,10 @@ Claude:  (payments_simulate_webhook provider=razorpay type=payment.succeeded ord
 Notes:
 
 - **Sandbox mode** uses the real scheme (Razorpay HMAC, Cashfree timestamped HMAC, Stripe `t=,v1=`, PayU reverse hash, Paytm checksum, PhonePe auth header, CCAvenue `encResp`). The gateway's webhook secret env var must be set.
-- **Mock mode** uses a generic `x-mock-signature` (HMAC with a fixed mock secret) over a body that is already a `NormalizedWebhookEvent`. That's useful for agent flows, but it doesn't exercise the real signature code. Use sandbox mode for that.
+- **Mock mode** uses a generic `x-mock-signature` (HMAC with a random per-process mock secret) over a body that is already a `NormalizedWebhookEvent`. That's useful for agent flows, but it doesn't exercise the real signature code. Use sandbox mode for that.
 - **Live mode** refuses with `LIVE_MUTATION_BLOCKED`. You should never be able to mint a validly signed production webhook with a tool.
-- Supported types: `payment.succeeded`, `payment.failed`, `refund.processed`. PayU refuses `refund.processed` with `NOT_IMPLEMENTED`, because refund webhooks aren't parsed.
-- Cashfree simulations carry the current timestamp. Replay them within 5 minutes, or the tolerance check rejects them, which is correct behaviour.
+- Supported types: `payment.succeeded`, `payment.failed`, `refund.processed`. PayU refuses `refund.processed` with `NOT_IMPLEMENTED`, because refund webhooks aren't parsed, and CCAvenue with `UNSUPPORTED`, because it sends no refund webhooks. Mock mode refuses the same simulations, and gateways without webhooks (Skydo) refuse all of them.
+- Cashfree simulations carry the current timestamp. The adapter accepts timestamps up to 24 h old (Cashfree retries for up to 30 minutes and documents no window), so replays within that window verify and are dropped by event-id dedupe.
 - Stripe simulations carry `t=` now. Replay within 300 s.
 
 To receive **real** sandbox webhooks on localhost, expose your port with a tunnel (`cloudflared tunnel --url http://localhost:3000`, `ngrok http 3000`) and register that URL in the gateway's test dashboard. Stripe also offers `stripe listen --forward-to localhost:3000/webhooks/stripe`, which prints a `whsec_` secret to use as `STRIPE_WEBHOOK_SECRET`.

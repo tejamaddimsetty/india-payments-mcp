@@ -12,7 +12,8 @@ MCP_HTTP_TOKEN=$MCP_HTTP_TOKEN PAYMENTS_MODE=mock npx india-payments-mcp http
 ```
 
 - Listens on `http://127.0.0.1:8787` by default (`MCP_HTTP_HOST`, `MCP_HTTP_PORT`).
-- MCP endpoint: `/mcp`. Health check: `/healthz` (no auth; returns version and mode only).
+- MCP endpoint: exactly `/mcp` (other paths are 404). Health check: `/healthz` (no auth; returns version and mode only).
+- `MCP_HTTP_PORT` must be an integer from 1 to 65535. Sessions idle for 30 minutes are closed (the client reconnects), and the server holds at most 1,000 sessions.
 - Every `/mcp` request needs `Authorization: Bearer <MCP_HTTP_TOKEN>`. The server refuses to start without a token of 24+ characters.
 - Add gateway test credentials as env vars for sandbox (`RAZORPAY_KEY_ID=rzp_test_…`, etc.). Restrict which gateways are exposed with `PAYMENTS_PROVIDERS=razorpay,cashfree`.
 - Verify locally:
@@ -48,7 +49,7 @@ Settings → Connectors (may require enabling developer mode / "custom connector
 
 ## 4. Security rules
 
-- **Never expose a live-mode server publicly.** `PAYMENTS_MODE=live` + a public URL means anyone with the token (or a misconfigured proxy) can create payments and, if `PAYMENTS_ALLOW_LIVE_MUTATIONS=true`, issue refunds. Live refunds also require `confirm=true` per call, but a model will happily pass that. Keep live mode to local stdio use with a human in the loop, or don't use it with agents at all.
+- **Never expose a live-mode server publicly.** `PAYMENTS_MODE=live` + a public URL means anyone with the token (or a misconfigured proxy) can create payments and, if `PAYMENTS_ALLOW_LIVE_MUTATIONS=true`, issue refunds. Live refunds (and Skydo receipt recording, in sandbox too, because Skydo has no sandbox) also require `confirm=true` per call, but a model will happily pass that. Keep live mode to local stdio use with a human in the loop, or don't use it with agents at all.
 - Prefer `PAYMENTS_MODE=mock` for ChatGPT. Code generation, capability maps, recommendations and signed test webhooks all work in mock mode with zero credentials.
 - Sandbox keys are still keys: rotate them after a public tunnel session.
 - Rotate `MCP_HTTP_TOKEN` per session; kill the tunnel when done. Quick tunnels (trycloudflare, free ngrok) have guessable-enough URLs to be scanned.
