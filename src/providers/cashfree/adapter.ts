@@ -35,9 +35,35 @@ const BASE_URLS = {
 /** Pinned: Cashfree response shapes change between versions. */
 export const CASHFREE_API_VERSION = '2026-01-01';
 const CHECKOUT_JS = 'https://sdk.cashfree.com/js/v3/cashfree.js';
-/** Webhooks whose x-webhook-timestamp is further than this from now are rejected (replay guard). */
-const WEBHOOK_TOLERANCE_MS = 5 * 60 * 1000;
+/**
+ * Replay guard on x-webhook-timestamp. Cashfree documents no replay window, and its default retry
+ * policy re-sends at 2, 10 and 30 minutes (custom policies go further) without saying whether the
+ * original timestamp is kept. A tight window would reject legitimate retries, so we only reject
+ * timestamps older than 24 h or more than 5 min in the future. Duplicate delivery is handled by
+ * dedupe on the event id (createWebhookHandler), not by this window.
+ */
+const WEBHOOK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const WEBHOOK_MAX_FUTURE_MS = 5 * 60 * 1000;
 const ORDER_ID_RE = /^[A-Za-z0-9_-]{3,45}$/;
+/** customer_details.customer_id: 3-50 chars, "Use alphanumeric values only" (Create Order reference). */
+const CUSTOMER_ID_RE = /^[A-Za-z0-9]{3,50}$/;
+/** refund_id: 3-40 chars, alphanumeric (Create Refund reference). */
+const REFUND_ID_RE = /^[A-Za-z0-9]{3,40}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Cashfree documents x-idempotency-key as a "UUID-formatted key". A caller key that is already a
+ * UUID is passed through; anything else is hashed (sha256, name-based like UUID v5) into a UUID,
+ * so the same key always maps to the same UUID and retries stay idempotent.
+ */
+export function cashfreeIdempotencyUuid(key: string): string {
+  if (UUID_RE.test(key)) return key.toLowerCase();
+  const h = sha256Hex(`india-payments-mcp:cashfree:${key}`).slice(0, 32).split('');
+  h[12] = '5'; // version nibble
+  h[16] = ((parseInt(h[16]!, 16) & 0x3) | 0x8).toString(16); // RFC 4122 variant
+  const x = h.join('');
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
+}
 
 /** base64(HMAC-SHA256(timestamp + rawBody, clientSecret)). No separator between the two. */
 export function cashfreeWebhookSignature(timestamp: string, rawBody: string, clientSecret: string): string {
@@ -121,22 +147,29 @@ export function mapCashfreeOrderStatus(s: string | undefined): PaymentStatus {
   }
 }
 
-function mapRefundStatus(s: string | undefined): RefundStatus {
+/** Documented refund_status: SUCCESS, PENDING, PENDING_APPROVAL, CANCELLED, ONHOLD, REJECTED. */
+export function mapCashfreeRefundStatus(s: string | undefined): RefundStatus {
   if (s === 'SUCCESS') return 'processed';
-  if (s === 'PENDING' || s === 'ONHOLD') return 'pending';
-  if (s === 'CANCELLED' || s === 'FAILED') return 'failed';
+  if (s === 'PENDING' || s === 'ONHOLD' || s === 'PENDING_APPROVAL') return 'pending';
+  // FAILED is not a documented value; kept defensively.
+  if (s === 'CANCELLED' || s === 'REJECTED' || s === 'FAILED') return 'failed';
   return 'unknown';
 }
+const mapRefundStatus = mapCashfreeRefundStatus;
 
-/** payment_group -> our method vocabulary. */
-function mapMethod(group: string | undefined): string | undefined {
+/** payment_group -> our method vocabulary. Order matters: cardless_emi and upi_credit_card contain "card". */
+export function mapCashfreeMethod(group: string | undefined): string | undefined {
   if (!group) return undefined;
-  if (/emi/.test(group) && group !== 'cardless_emi') return 'emi';
+  if (group === 'cardless_emi') return 'cardless_emi';
+  // upi, upi_credit_card, upi_ppi, upi_ppi_offline are all UPI rails.
+  if (group.startsWith('upi')) return 'upi';
+  if (/emi/.test(group)) return 'emi';
   if (/card/.test(group)) return 'card';
   if (group === 'net_banking') return 'netbanking';
   if (group === 'pay_later') return 'paylater';
   return group;
 }
+const mapMethod = mapCashfreeMethod;
 
 /** Cashfree sends ms; accept seconds too. Returns epoch ms or NaN. */
 function timestampMs(raw: string): number {
@@ -203,13 +236,21 @@ class CashfreeGateway implements PaymentGateway {
         hint: 'Pass customer: { phone: "9999999999" } (10-digit Indian mobile). Cashfree uses it for UPI/OTP flows.',
       });
     }
-    // customer_id is mandatory. Derive a stable, non-PII id from the phone so the same buyer
-    // maps to the same Cashfree customer across orders.
-    const customerId = input.customer?.id ?? `cust_${sha256Hex(phone).slice(0, 24)}`;
+    // customer_id is mandatory, 3-50 alphanumeric. Derive a stable, non-PII id from the phone so
+    // the same buyer maps to the same Cashfree customer across orders.
+    if (input.customer?.id !== undefined && !CUSTOMER_ID_RE.test(input.customer.id)) {
+      throw new PaymentError('VALIDATION', `Cashfree customer_id (customer.id) must be 3-50 alphanumeric characters. Got "${input.customer.id}".`, {
+        provider: 'cashfree',
+        hint: 'Use letters and digits only (no "_", "-" or spaces), or omit customer.id and a stable id is derived from the phone.',
+      });
+    }
+    const customerId = input.customer?.id ?? `cust${sha256Hex(phone).slice(0, 24)}`;
 
     let returnUrl = input.returnUrl;
     if (returnUrl && !returnUrl.includes('{order_id}')) {
       // Cashfree substitutes {order_id}; without it the return page cannot tell which order came back.
+      // Unverified for the latest API version: the placeholder is documented only in Cashfree's
+      // migration guide, not in the 2026-01-01 Create Order reference.
       returnUrl += `${returnUrl.includes('?') ? '&' : '?'}order_id={order_id}`;
     }
     const orderMeta: Record<string, string> = {};
@@ -233,10 +274,10 @@ class CashfreeGateway implements PaymentGateway {
     };
 
     // With x-idempotency-key Cashfree replays the original response, so a retry cannot create a
-    // second order. Without it the POST is never auto-retried.
+    // second order. Without it the POST is never auto-retried. The header must be a UUID.
     const { data: order } = await this.call<CfOrder>('POST', '/orders', 'create_order', {
       body,
-      headers: input.idempotencyKey ? { 'x-idempotency-key': input.idempotencyKey } : undefined,
+      headers: input.idempotencyKey ? { 'x-idempotency-key': cashfreeIdempotencyUuid(input.idempotencyKey) } : undefined,
       retrySafe: Boolean(input.idempotencyKey),
     });
 
@@ -340,6 +381,12 @@ class CashfreeGateway implements PaymentGateway {
   }
 
   async refund(input: RefundInput): Promise<RefundResult> {
+    if (!REFUND_ID_RE.test(input.refundRef)) {
+      throw new PaymentError('VALIDATION', `Cashfree refund_id (refundRef) must be 3-40 alphanumeric characters. Got "${input.refundRef}".`, {
+        provider: 'cashfree',
+        hint: 'Cashfree rejects "_", "-" and other symbols in refund_id. Use letters and digits only, e.g. "rf1001".',
+      });
+    }
     const path = this.orderPath(input.orderRef);
     let amount = input.amount;
     let currency = 'INR';
@@ -355,8 +402,13 @@ class CashfreeGateway implements PaymentGateway {
       refund_speed: input.speed === 'instant' ? 'INSTANT' : 'STANDARD',
       ...(input.reason ? { refund_note: input.reason } : {}),
     };
-    // refund_id is merchant-supplied and unique per order, so a retried POST cannot refund twice.
-    const { data } = await this.call<CfRefund>('POST', `${path}/refunds`, 'create_refund', { body, retrySafe: true });
+    // Retry safety comes from the documented x-idempotency-key (a UUID derived deterministically
+    // from order + refundRef). refund_id uniqueness per order is not documented as a de-dupe.
+    const { data } = await this.call<CfRefund>('POST', `${path}/refunds`, 'create_refund', {
+      body,
+      headers: { 'x-idempotency-key': cashfreeIdempotencyUuid(`refund:${input.orderRef}:${input.refundRef}`) },
+      retrySafe: true,
+    });
     return this.toRefundResult(input.refundRef, data);
   }
 
@@ -393,10 +445,11 @@ class CashfreeGateway implements PaymentGateway {
       });
     }
     const ts = timestampMs(timestamp);
-    if (!Number.isFinite(ts) || Math.abs(this.ctx.now().getTime() - ts) > WEBHOOK_TOLERANCE_MS) {
-      throw new PaymentError('SIGNATURE_INVALID', 'Cashfree webhook timestamp is outside the 5 minute tolerance (possible replay).', {
+    const age = this.ctx.now().getTime() - ts;
+    if (!Number.isFinite(ts) || age > WEBHOOK_MAX_AGE_MS || age < -WEBHOOK_MAX_FUTURE_MS) {
+      throw new PaymentError('SIGNATURE_INVALID', 'Cashfree webhook timestamp is outside the accepted window (older than 24 hours or more than 5 minutes in the future; possible replay).', {
         provider: 'cashfree',
-        hint: 'Check the server clock (NTP). A replayed old webhook must not be processed.',
+        hint: 'Check the server clock (NTP). Duplicates inside the window are dropped by event-id dedupe, so store and check the event id.',
       });
     }
 
@@ -407,11 +460,19 @@ class CashfreeGateway implements PaymentGateway {
         order?: { order_id?: string; order_amount?: number; order_currency?: string; order_tags?: Record<string, string> | null };
         payment?: CfPayment;
         refund?: CfRefund;
+        /** AUTO_REFUND_STATUS_WEBHOOK: same refund fields but no refund_id. */
+        auto_refund?: Partial<CfRefund>;
+        dispute?: { dispute_id?: string | number; dispute_amount?: number; dispute_amount_currency?: string; dispute_status?: string };
+        order_details?: { order_id?: string; order_amount?: number; order_currency?: string; cf_payment_id?: string | number };
       };
     };
     const order = body.data?.order;
     const payment = body.data?.payment;
-    const refund = body.data?.refund;
+    const refund = (body.data?.refund ?? body.data?.auto_refund) as CfRefund | undefined;
+    const dispute = body.data?.dispute;
+    const orderDetails = body.data?.order_details;
+    // Documented on webhook versions 2025-01-01+: a hash unique per webhook payload, for dedupe.
+    const idempotencyHeader = getHeader(input.headers, 'x-idempotency-header');
 
     let type: WebhookEventType;
     switch (body.type) {
@@ -431,24 +492,37 @@ class CashfreeGateway implements PaymentGateway {
       case 'DISPUTE_CREATED':
         type = 'dispute.created';
         break;
+      case 'DISPUTE_UPDATED':
+      case 'DISPUTE_CLOSED':
+        // No normalized type for these yet; providerEventType keeps the original name.
+        type = 'unknown';
+        break;
       default:
         type = 'unknown';
     }
 
-    // Refund webhooks repeat for each status change of the same refund, so the status is part of the key.
-    const id = refund
-      ? `${body.type}:${refund.cf_refund_id ?? refund.refund_id}:${refund.refund_status}`
-      : `${body.type}:${payment?.cf_payment_id ?? order?.order_id ?? timestamp}`;
-    const currency = refund?.refund_currency ?? payment?.payment_currency ?? order?.order_currency ?? 'INR';
-    const major = refund?.refund_amount ?? payment?.payment_amount ?? order?.order_amount;
+    // Prefer Cashfree's own x-idempotency-header. Otherwise build one: refund webhooks repeat for
+    // each status change of the same refund (status is part of the key), disputes per status too.
+    const id =
+      idempotencyHeader ??
+      (refund
+        ? `${body.type}:${refund.cf_refund_id ?? refund.refund_id}:${refund.refund_status}`
+        : dispute
+          ? `${body.type}:${dispute.dispute_id}:${dispute.dispute_status ?? ''}`
+          : `${body.type}:${payment?.cf_payment_id ?? order?.order_id ?? timestamp}`);
+    const currency =
+      refund?.refund_currency ?? payment?.payment_currency ?? dispute?.dispute_amount_currency ?? order?.order_currency ?? orderDetails?.order_currency ?? 'INR';
+    // All Cashfree amounts, dispute_amount included, are rupees.
+    const major = refund?.refund_amount ?? payment?.payment_amount ?? dispute?.dispute_amount ?? order?.order_amount;
+    const cfPaymentId = payment?.cf_payment_id ?? refund?.cf_payment_id ?? orderDetails?.cf_payment_id;
 
     return {
       provider: 'cashfree',
       id,
       type,
       providerEventType: body.type,
-      orderRef: order?.order_id ?? refund?.order_id ?? payment?.order_id,
-      providerPaymentId: payment?.cf_payment_id !== undefined ? String(payment.cf_payment_id) : refund?.cf_payment_id !== undefined ? String(refund.cf_payment_id) : undefined,
+      orderRef: order?.order_id ?? refund?.order_id ?? payment?.order_id ?? orderDetails?.order_id,
+      providerPaymentId: cfPaymentId !== undefined ? String(cfPaymentId) : undefined,
       providerRefundId: refund?.cf_refund_id !== undefined ? String(refund.cf_refund_id) : undefined,
       refundRef: refund?.refund_id,
       status: payment ? mapCashfreePaymentStatus(payment.payment_status) : undefined,
@@ -474,7 +548,7 @@ class CashfreeGateway implements PaymentGateway {
         refund: {
           cf_refund_id: `sim${now.getTime()}`,
           cf_payment_id: cfPaymentId,
-          refund_id: input.refundRef ?? `refund_${input.orderRef}`,
+          refund_id: input.refundRef ?? `refund${input.orderRef.replace(/[^A-Za-z0-9]/g, '')}`,
           order_id: input.orderRef,
           refund_amount: rupees,
           refund_currency: currency,
@@ -497,7 +571,7 @@ class CashfreeGateway implements PaymentGateway {
           payment_time: now.toISOString(),
           payment_group: 'upi',
         },
-        customer_details: { customer_id: 'cust_simulated', customer_phone: '9999999999' },
+        customer_details: { customer_id: 'custsimulated', customer_phone: '9999999999' },
       };
     }
     const rawBody = JSON.stringify({ data, event_time: now.toISOString(), type });
@@ -525,8 +599,8 @@ export const cashfree: ProviderModule<CashfreeCredentials> = {
         hint: 'Merchant Dashboard > Developers > API Keys. Sandbox (test) and production keys are separate.',
       });
     }
-    // Key prefixes are a best-effort guard: sandbox app ids start with TEST, and newer secrets
-    // carry _test_ / _prod_. Absent markers are not treated as errors.
+    // Key prefixes are a best-effort guard and NOT documented by Cashfree: observed sandbox app
+    // ids start with TEST, and newer secrets carry _test_ / _prod_. Absent markers are not errors.
     if (ctx.environment === 'live' && (creds.clientId.startsWith('TEST') || creds.clientSecret.includes('_test_'))) {
       throw new PaymentError('CONFIG_INVALID', 'PAYMENTS_MODE=live but the Cashfree credentials look like sandbox (test) keys.', { provider: 'cashfree' });
     }

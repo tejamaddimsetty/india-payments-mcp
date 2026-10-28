@@ -139,7 +139,17 @@ describe('phonepe adapter', () => {
     await expect(gw.createPayment({ ...base, orderRef: 'bad ref!' })).rejects.toMatchObject({ code: 'VALIDATION' });
     await expect(gw.createPayment({ ...base, providerOptions: { expireAfter: 60 } })).rejects.toMatchObject({ code: 'VALIDATION' });
     await expect(gw.createPayment({ ...base, currency: 'USD' })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.createPayment({ ...base, metadata: { udf2: 'x'.repeat(257) } })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.createPayment({ ...base, metadata: { udf12: 'has space' } })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.createPayment({ ...base, metadata: { udf11: 'x'.repeat(51) } })).rejects.toMatchObject({ code: 'VALIDATION' });
     expect(requests).toHaveLength(0);
+  });
+
+  it('accepts metaInfo values at the documented limits', async () => {
+    const { gw, requests } = gateway([tokenRoute, { match: 'POST https://api-preprod.phonepe.com/apis/pg-sandbox/checkout/v2/pay', body: { orderId: 'OMO1', state: 'PENDING', expireAt: 1, redirectUrl: 'https://x' } }]);
+    await gw.createPayment({ orderRef: 'ord_1', amount: 100, returnUrl: 'https://x.test/r', metadata: { udf10: 'free text, any chars! '.padEnd(256, 'x'), udf15: 'a_b-c+d@e.f' } });
+    const call = requests.find((r) => r.url.endsWith('/checkout/v2/pay'))!;
+    expect(JSON.parse(call.body!).metaInfo.udf15).toBe('a_b-c+d@e.f');
   });
 
   it('maps order status and picks the latest attempt', async () => {
@@ -223,6 +233,23 @@ describe('phonepe adapter', () => {
     });
     const ev = await gw.parseWebhook({ headers: { authorization: phonepeWebhookAuthorization('hookuser', 'hookpass') }, rawBody });
     expect(ev).toMatchObject({ type: 'refund.failed', refundRef: 'rf_1', orderRef: 'ord_1', providerRefundId: 'OMR1', status: undefined });
+  });
+
+  it('reads a flat (unwrapped) refund webhook like the documented UPI sample', async () => {
+    const { gw } = gateway([]);
+    const rawBody = JSON.stringify({ originalMerchantOrderId: 'ord_1', amount: 1000, state: 'COMPLETED', timestamp: 1761645600000, refundId: 'OMR2', errorCode: null, detailedErrorCode: null, splitInstruments: [] });
+    const ev = await gw.parseWebhook({ headers: { authorization: phonepeWebhookAuthorization('hookuser', 'hookpass') }, rawBody });
+    expect(ev).toMatchObject({
+      type: 'refund.processed',
+      providerEventType: 'pg.refund.completed',
+      orderRef: 'ord_1',
+      providerRefundId: 'OMR2',
+      refundRef: undefined,
+      amount: 1000,
+      status: undefined,
+      occurredAt: new Date(1761645600000).toISOString(),
+    });
+    expect(ev.id).toBe('pg.refund.completed:OMR2:COMPLETED');
   });
 
   it.each(['payment.succeeded', 'payment.failed', 'refund.processed'] as const)('simulateWebhook(%s) round-trips', async (type) => {

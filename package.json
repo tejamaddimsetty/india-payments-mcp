@@ -31,7 +31,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "inspect": "npx @modelcontextprotocol/inspector tsx src/cli.ts"
+    "inspect": "npx @modelcontextprotocol/inspector tsx src/cli.ts",
+    "sandbox:smoke": "tsx scripts/sandbox-smoke.ts"
   },
   "keywords": [
     "mcp",

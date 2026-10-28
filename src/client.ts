@@ -27,6 +27,7 @@ import type {
 } from './core/types.js';
 import { MockGateway, MockLedger } from './mock/mock-gateway.js';
 import { allCapabilities, PROVIDERS } from './providers/index.js';
+import { SKYDO_MIN_USD_CENTS, SkydoGateway, type RecordPaymentInput } from './providers/skydo/adapter.js';
 
 export interface PaymentsClientOptions {
   config?: Partial<PaymentsConfig>;
@@ -159,6 +160,38 @@ export class PaymentsClient {
     return gw;
   }
 
+  /** Skydo rules, enforced here so mock mode behaves exactly like the real adapter. */
+  private assertSkydoCurrency(currency: string | undefined, amount: number) {
+    const c = currency?.toUpperCase();
+    if (!c || c === 'INR') {
+      throw new PaymentError('VALIDATION', 'Skydo receives foreign currency from abroad: pass the client\'s currency (USD, GBP, EUR, CAD, AUD, AED, SGD, ...). INR is not supported.', { provider: 'skydo' });
+    }
+    if (c === 'USD' && amount < SKYDO_MIN_USD_CENTS) {
+      throw new PaymentError('VALIDATION', `Skydo's minimum payment is USD 50.00 (amount is in cents: 5000).`, { provider: 'skydo' });
+    }
+  }
+
+  private skydo(): SkydoGateway {
+    if (this.config.mode === 'mock') {
+      throw new PaymentError('VALIDATION', 'Mock mode simulates Skydo receipts with payments_mock_complete_payment.', { provider: 'skydo' });
+    }
+    const gw = this.gateway('skydo');
+    if (!(gw instanceof SkydoGateway)) throw new PaymentError('VALIDATION', 'Skydo gateway unavailable.', { provider: 'skydo' });
+    return gw;
+  }
+
+  /** Skydo ledger mode: record money Skydo told you arrived (email/WhatsApp/dashboard/FIRA). */
+  async skydoRecordPayment(input: RecordPaymentInput) {
+    const gw = this.skydo();
+    return this.audited({ action: 'skydo_record_payment', provider: 'skydo', orderRef: input.orderRef, amount: input.amountReceived }, () => gw.recordPayment(input));
+  }
+
+  /** Skydo ledger mode: orders still waiting for money. */
+  async skydoOutstanding() {
+    const gw = this.skydo();
+    return { mode: gw.mode, outstanding: gw.mode === 'ledger' ? gw.outstanding() : [], note: gw.mode === 'zoho' ? 'Zoho bridge: outstanding invoices are in Zoho Books (status sent/overdue/partially_paid).' : undefined };
+  }
+
   /** The mock gateway, for tests and the payments_mock_complete_payment tool. */
   mockGateway(provider: ProviderId): MockGateway {
     const gw = this.gateway(provider);
@@ -209,6 +242,7 @@ export class PaymentsClient {
         hint: 'This is the safe common denominator across gateways (Razorpay receipt max 40; Paytm, PhonePe and Cashfree reject other characters). PayU refund ids are further capped at 23.',
       });
     }
+    if (provider === 'skydo') this.assertSkydoCurrency(input.currency, input.amount);
     const currency = (input.currency ?? 'INR').toUpperCase();
     const overridden = Object.keys(input.providerOptions ?? {}).filter((k) => PROTECTED_PROVIDER_OPTIONS.has(k));
     if (overridden.length) {
@@ -252,7 +286,7 @@ export class PaymentsClient {
     };
   }
 
-  getPaymentStatus(provider: ProviderId, input: PaymentStatusInput) {
+  async getPaymentStatus(provider: ProviderId, input: PaymentStatusInput) {
     return this.requireFeature(provider, 'paymentStatus', 'getPaymentStatus').getPaymentStatus(input);
   }
 
@@ -269,7 +303,7 @@ export class PaymentsClient {
     });
   }
 
-  getRefundStatus(provider: ProviderId, input: RefundStatusInput) {
+  async getRefundStatus(provider: ProviderId, input: RefundStatusInput) {
     return this.requireFeature(provider, 'refundStatus', 'getRefundStatus').getRefundStatus(input);
   }
 
@@ -286,7 +320,7 @@ export class PaymentsClient {
     }
   }
 
-  simulateWebhook(provider: ProviderId, input: SimulateWebhookInput) {
+  async simulateWebhook(provider: ProviderId, input: SimulateWebhookInput) {
     const gw = this.gateway(provider);
     if (!gw.simulateWebhook) throw notImplemented(provider, 'webhook simulation');
     if (this.config.mode === 'live') {
@@ -295,16 +329,16 @@ export class PaymentsClient {
     return gw.simulateWebhook(input);
   }
 
-  createCustomer(provider: ProviderId, input: CreateCustomerInput) {
+  async createCustomer(provider: ProviderId, input: CreateCustomerInput) {
     return this.requireFeature(provider, 'customers', 'createCustomer').createCustomer(input);
   }
 
-  createSubscription(provider: ProviderId, input: CreateSubscriptionInput) {
+  async createSubscription(provider: ProviderId, input: CreateSubscriptionInput) {
     const gw = this.requireFeature(provider, 'subscriptions', 'createSubscription');
     return this.audited({ action: 'create_subscription', provider, orderRef: input.subscriptionRef }, () => gw.createSubscription(input));
   }
 
-  cancelSubscription(provider: ProviderId, input: CancelSubscriptionInput, opts: { confirm?: boolean } = {}) {
+  async cancelSubscription(provider: ProviderId, input: CancelSubscriptionInput, opts: { confirm?: boolean } = {}) {
     const gw = this.requireFeature(provider, 'subscriptions', 'cancelSubscription');
     return this.audited({ action: 'cancel_subscription', provider, detail: { providerSubscriptionId: input.providerSubscriptionId } }, async () => {
       this.assertLiveMutationAllowed('Subscription cancellation', provider, opts.confirm === true);
@@ -312,7 +346,7 @@ export class PaymentsClient {
     });
   }
 
-  listSettlements(provider: ProviderId, input: ListSettlementsInput) {
+  async listSettlements(provider: ProviderId, input: ListSettlementsInput) {
     return this.requireFeature(provider, 'settlements', 'listSettlements').listSettlements(input);
   }
 }

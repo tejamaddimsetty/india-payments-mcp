@@ -10,10 +10,10 @@ export const payuCapabilities: ProviderCapabilities = {
     'Large Indian gateway with a hosted checkout reached by HTML form POST, SHA-512 hashes instead of API auth, and a single "postservice" endpoint for status and refunds.',
   features: {
     createPayment: featureRow('supported', 'Hosted checkout: form POST to /_payment with sha512(key|txnid|amount|productinfo|firstname|email|udf1..udf5||||||SALT). No API call is made.'),
-    verifyPayment: featureRow('supported', 'Reverse hash sha512([additional_charges|]SALT|status||||||udf5..udf1|email|firstname|productinfo|amount|txnid|key). PayU still recommends a verify_payment call before fulfilling.'),
+    verifyPayment: featureRow('supported', 'Reverse hash sha512([additional_charges|]SALT|status||||||udf5..udf1|email|firstname|productinfo|amount|txnid|key). PayU still recommends a verify_payment call before fulfilling. additional_charges is also read as additionalCharges (the webhook field table spells it that way).'),
     paymentStatus: featureRow('supported', 'postservice command=verify_payment, var1=txnid (our orderRef).'),
-    refund: featureRow('supported', 'postservice command=cancel_refund_transaction, var1=mihpayid (providerPaymentId), var2=refundRef (max 23 chars). Cancels if only authorised, refunds if captured. Omitting amount refunds the ORIGINAL amount; after a partial refund always pass the remaining amount explicitly. PayU de-duplication of refund ids is undocumented: on OUTCOME_UNKNOWN check status before retrying.'),
-    refundStatus: featureRow('partial', 'postservice command=check_action_status, var1=request_id (providerRefundId). The command name and response shape come from community SDKs (PARTIAL), so parsing is defensive.'),
+    refund: featureRow('supported', 'postservice command=cancel_refund_transaction, var1=mihpayid (providerPaymentId), var2=refundRef (max 23 chars). Cancels if only authorised (the id then comes back as txn_update_id), refunds if captured. Omitting amount refunds the ORIGINAL amount; after a partial refund always pass the remaining amount explicitly. PayU de-duplication of refund ids is undocumented: on OUTCOME_UNKNOWN check status before retrying.'),
+    refundStatus: featureRow('supported', 'postservice command=check_action_status, var1=request_id (providerRefundId), as in the PayU docs and the official PHP SDK (checkRefundStatus). Both documented response shapes are parsed: nested transaction_details.{request_id}.{request_id}.{status, amt} and flat {refund_status, refund_amount}. QUEUED / REQUESTED / IN PROGRESS / processing / od_hit map to pending.'),
     webhooks: featureRow('partial', 'Payment webhooks carry the same reverse hash as the surl/furl callback; form-encoded and JSON bodies are both accepted. Refund webhooks are not parsed: poll getRefundStatus instead.'),
     customers: featureRow('unsupported', 'PayU has no standalone customer object; saved cards hang off a merchant-supplied user_credentials string.'),
     subscriptions: featureRow('not_implemented', 'PayU offers recurring payments via Standing Instructions (si=1, si_details) and mandate APIs (UNVERIFIED).'),
@@ -31,7 +31,8 @@ export const payuCapabilities: ProviderCapabilities = {
   ],
   constraints: [
     'Test and live keys are different, but nothing in the key tells them apart: make sure PAYMENTS_MODE matches the key you configured.',
-    'txnid (our orderRef) must be unique per payment attempt; PayU rejects a reused txnid.',
+    'txnid (our orderRef) must be unique per payment attempt and at most 25 characters; PayU rejects a reused txnid.',
+    'Field limits (enforced): productinfo 100, firstname 60, email 50, udf1..udf5 255 characters. The docs also list 50 for surl/furl; that is only logged as a warning because it looks stale.',
     'firstname, email and phone are required by the hosted checkout; pass them in customer.',
     'surl/furl are required: createPayment needs returnUrl. PayU POSTs the result there, so the URL must accept POST.',
     'Only 5 user-defined fields (udf1..udf5): metadata is capped at 5 values, mapped in insertion order. Keys are not sent.',

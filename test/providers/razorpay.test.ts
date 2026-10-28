@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PaymentError } from '../../src/core/errors.js';
-import { razorpay, razorpayPaymentSignature, razorpayWebhookSignature } from '../../src/providers/razorpay/adapter.js';
+import { razorpay, razorpayPaymentSignature, razorpaySubscriptionSignature, razorpayWebhookSignature } from '../../src/providers/razorpay/adapter.js';
 import { fakeFetch, testContext } from '../helpers.js';
 
 const creds = { keyId: 'rzp_test_abc123', keySecret: 'secret_xyz', webhookSecret: 'whsec_test' };
@@ -26,6 +26,8 @@ describe('razorpay', () => {
     expect(res.checkout.type).toBe('js_sdk');
     if (res.checkout.type === 'js_sdk') {
       expect(res.checkout.options.key).toBe('rzp_test_abc123');
+      // Checkout `name` is mandatory; falls back when RAZORPAY_MERCHANT_NAME is unset.
+      expect(res.checkout.options.name).toBe('Payment');
       expect(JSON.stringify(res.checkout.options)).not.toContain('secret_xyz');
     }
     const sent = JSON.parse(requests[0]!.body!);
@@ -40,10 +42,90 @@ describe('razorpay', () => {
     const sig = razorpayPaymentSignature('order_9', 'pay_9', creds.keySecret);
     const good = await gw.verifyPayment({ orderRef: 'ord_9', expectedAmount: 1000, payload: { razorpay_order_id: 'order_9', razorpay_payment_id: 'pay_9', razorpay_signature: sig } });
     expect(good.valid).toBe(true);
-    const bad = await gw.verifyPayment({ payload: { razorpay_order_id: 'order_9', razorpay_payment_id: 'pay_10', razorpay_signature: sig } });
-    expect(bad.valid).toBe(false);
+    const bad = await gw.verifyPayment({ providerOrderId: 'order_9', payload: { razorpay_order_id: 'order_9', razorpay_payment_id: 'pay_10', razorpay_signature: sig } });
+    expect(bad).toMatchObject({ valid: false, reason: 'Signature mismatch' });
     const wrongAmount = await gw.verifyPayment({ orderRef: 'ord_9', expectedAmount: 999, payload: { razorpay_order_id: 'order_9', razorpay_payment_id: 'pay_9', razorpay_signature: sig } });
     expect(wrongAmount.valid).toBe(false);
+  });
+
+  it('signs with the server-stored providerOrderId, not the one Checkout returned', async () => {
+    const { gw, requests } = gateway();
+    const sig = razorpayPaymentSignature('order_9', 'pay_9', creds.keySecret);
+    // Stored id alone (no payload order id) is enough.
+    expect(await gw.verifyPayment({ providerOrderId: 'order_9', payload: { razorpay_payment_id: 'pay_9', razorpay_signature: sig } }))
+      .toMatchObject({ valid: true, providerOrderId: 'order_9', status: 'authorized' });
+    // A genuine signature for another order does not verify against the stored id.
+    const otherSig = razorpayPaymentSignature('order_other', 'pay_9', creds.keySecret);
+    expect((await gw.verifyPayment({ providerOrderId: 'order_9', payload: { razorpay_payment_id: 'pay_9', razorpay_signature: otherSig } })).valid).toBe(false);
+    // Payload carrying a different order id is rejected outright.
+    expect(await gw.verifyPayment({ providerOrderId: 'order_9', payload: { razorpay_order_id: 'order_other', razorpay_payment_id: 'pay_9', razorpay_signature: otherSig } }))
+      .toMatchObject({ valid: false, reason: expect.stringMatching(/not the stored order_9/) });
+    // Neither providerOrderId nor orderRef: cannot bind.
+    expect(await gw.verifyPayment({ payload: { razorpay_order_id: 'order_9', razorpay_payment_id: 'pay_9', razorpay_signature: sig } }))
+      .toMatchObject({ valid: false, reason: expect.stringMatching(/providerOrderId/) });
+    // Malformed stored id.
+    expect((await gw.verifyPayment({ providerOrderId: 'pay_9', payload: { razorpay_payment_id: 'pay_9', razorpay_signature: sig } })).valid).toBe(false);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('verifies a subscription callback against the stored sub_ id', async () => {
+    const { gw } = gateway([
+      { match: 'GET https://api.razorpay.com/v1/subscriptions/sub_1', body: { id: 'sub_1', notes: { subscription_ref: 's1' } } },
+      { match: 'GET https://api.razorpay.com/v1/payments/pay_1', body: { id: 'pay_1', order_id: null, amount: 500, amount_refunded: 0, currency: 'INR', status: 'captured', method: 'card', refund_status: null, created_at: 1 } },
+    ]);
+    const sig = razorpaySubscriptionSignature('pay_1', 'sub_1', creds.keySecret);
+    expect(await gw.verifyPayment({ providerOrderId: 'sub_1', payload: { razorpay_payment_id: 'pay_1', razorpay_subscription_id: 'sub_1', razorpay_signature: sig } }))
+      .toMatchObject({ valid: true, orderRef: 's1', providerOrderId: 'sub_1', status: 'captured' });
+    expect((await gw.verifyPayment({ providerOrderId: 'sub_2', payload: { razorpay_payment_id: 'pay_1', razorpay_subscription_id: 'sub_1', razorpay_signature: sig } })).valid).toBe(false);
+    expect((await gw.verifyPayment({ providerOrderId: 'order_1', payload: { razorpay_payment_id: 'pay_1', razorpay_subscription_id: 'sub_1', razorpay_signature: sig } })).valid).toBe(false);
+  });
+
+  it('creates subscriptions with documented params and rejects daily plans under 7 days', async () => {
+    const { gw, requests } = gateway([
+      { match: 'POST https://api.razorpay.com/v1/plans', body: { id: 'plan_1' } },
+      { match: 'POST https://api.razorpay.com/v1/subscriptions/sub_1/cancel', body: { id: 'sub_1', status: 'active', notes: { subscription_ref: 's1' } } },
+      { match: 'POST https://api.razorpay.com/v1/subscriptions', body: { id: 'sub_1', status: 'created' } },
+    ]);
+    await expect(gw.createSubscription!({ subscriptionRef: 's0', totalCount: 12, plan: { name: 'D', amount: 100, interval: 'day', intervalCount: 6 } }))
+      .rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(requests).toHaveLength(0);
+    const sub = await gw.createSubscription!({ subscriptionRef: 's1', totalCount: 12, providerCustomerId: 'cust_1', plan: { name: 'W', amount: 100, interval: 'day', intervalCount: 7 } });
+    expect(JSON.parse(requests[0]!.body!)).toMatchObject({ period: 'daily', interval: 7 });
+    const body = JSON.parse(requests[1]!.body!);
+    expect(body).toMatchObject({ plan_id: 'plan_1', customer_notify: true, notes: { subscription_ref: 's1', customer_id: 'cust_1' } });
+    expect(body.customer_id).toBeUndefined();
+    if (sub.checkout?.type === 'js_sdk') expect(sub.checkout.options.name).toBe('Payment');
+    await gw.cancelSubscription!({ providerSubscriptionId: 'sub_1', atCycleEnd: true });
+    expect(JSON.parse(requests[2]!.body!)).toEqual({ cancel_at_cycle_end: true });
+  });
+
+  it('uses RAZORPAY_MERCHANT_NAME for the Checkout name', async () => {
+    const f = fakeFetch([{ match: 'POST https://api.razorpay.com/v1/orders', body: { id: 'order_1', amount: 100, currency: 'INR', receipt: 'o1', status: 'created', notes: {} } }]);
+    const gw = razorpay.create({ ...creds, merchantName: 'Acme Ltd' }, testContext('razorpay', f.fetch));
+    const res = await gw.createPayment({ orderRef: 'o1', amount: 100 });
+    if (res.checkout.type === 'js_sdk') expect(res.checkout.options.name).toBe('Acme Ltd');
+    expect(razorpay.capabilities.credentials.find((c) => c.env === 'RAZORPAY_MERCHANT_NAME')).toMatchObject({ key: 'merchantName', required: false, secret: false });
+    expect(razorpay.capabilities.paymentMethods).not.toContain('cardless_emi');
+  });
+
+  it('reads subscription, dispute and settlement entities from webhooks', async () => {
+    const { gw } = gateway();
+    const send = (event: string, payload: Record<string, unknown>) => {
+      const rawBody = JSON.stringify({ event, payload, created_at: 1700000000 });
+      return gw.parseWebhook({ headers: { 'x-razorpay-signature': razorpayWebhookSignature(rawBody, creds.webhookSecret) }, rawBody });
+    };
+    expect(await send('subscription.charged', {
+      subscription: { entity: { id: 'sub_1', notes: { subscription_ref: 's1' } } },
+      payment: { entity: { id: 'pay_1', order_id: 'order_x', amount: 500, amount_refunded: 0, currency: 'INR', status: 'captured' } },
+    })).toMatchObject({ type: 'subscription.charged', orderRef: 's1', providerOrderId: 'sub_1', providerPaymentId: 'pay_1', amount: 500 });
+    expect(await send('subscription.halted', { subscription: { entity: { id: 'sub_2', notes: { subscription_ref: 's2' } } } }))
+      .toMatchObject({ type: 'subscription.halted', orderRef: 's2', providerOrderId: 'sub_2' });
+    expect(await send('payment.dispute.created', {
+      payment: { entity: { id: 'pay_1', order_id: 'order_1', amount: 1000, amount_refunded: 0, currency: 'INR', status: 'captured' } },
+      dispute: { entity: { id: 'disp_1', amount: 400, currency: 'INR' } },
+    })).toMatchObject({ type: 'dispute.created', amount: 400 });
+    expect(await send('settlement.processed', { settlement: { entity: { id: 'setl_1', amount: 9900, utr: 'UTR1' } } }))
+      .toMatchObject({ type: 'settlement.processed', amount: 9900, id: 'settlement.processed:setl_1' });
   });
 
   it('maps order status from the best payment attempt', async () => {

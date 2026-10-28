@@ -159,11 +159,19 @@ describe('browser checkout', () => {
 });
 
 describe('honest special cases', () => {
-  it.each(FRAMEWORKS)('skydo / %s is a guide with a warning and no code', (framework) => {
+  it.each(FRAMEWORKS)('skydo / %s: honest warning, SDK-based code that never calls Skydo, Zoho + ledger guide', (framework) => {
     const r = generateIntegration({ provider: 'skydo', framework });
     expect(r.warnings.join(' ')).toMatch(/no public developer API/i);
-    expect(r.files.every((f) => f.language === 'markdown')).toBe(true);
-    expect(r.files.map((f) => f.contents).join('')).not.toContain('india-payments-mcp\'');
+    const all = r.files.map((f) => f.contents).join('\n');
+    expect(all).toContain("from 'india-payments-mcp'");
+    expect(all).not.toMatch(/api\.skydo\.com|dashboard\.skydo\.com\/api/);
+    expect(all).toContain('skydoRecordPayment');
+    expect(all).toContain('Connect Skydo to Zoho');
+    expect(all).toMatch(/single-use/);
+    expect(all).not.toMatch(/reusable one per client/);
+    const env = r.files.find((f) => f.path === '.env.example')!.contents;
+    for (const v of ['SKYDO_RECEIVING_ACCOUNTS', 'ZOHO_REFRESH_TOKEN', 'ZOHO_ITEM_ID', 'ADMIN_API_TOKEN']) expect(env).toContain(v);
+    expect(r.files.some((f) => /skydo-routes\.ts$|app\/api\/skydo\//.test(f.path))).toBe(true);
   });
 
   it.each(PROVIDER_IDS.filter((p) => p !== 'skydo'))('shopify / %s warns about approved apps and Shopify Payments in India', (provider) => {

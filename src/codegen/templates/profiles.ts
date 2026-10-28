@@ -139,11 +139,12 @@ const P: Record<ProviderId, ProviderProfile> = {
     webhookEvents: { checkout: [], refunds: [], subscriptions: [] },
     dashboardSteps: [
       'Skydo dashboard: complete KYC and add the bank account where INR settlements should land.',
-      'Create an InstaLink (payment link) per invoice or a reusable one per client, in the client\'s currency.',
-      'Optional: connect Zoho Books (Skydo > Integrations) so invoices sync and get marked paid automatically.',
+      'Zoho bridge: Skydo profile > Connect Skydo to Zoho > Connect Securely (only invoices created after connecting are imported).',
+      'Zoho Books: create a service item for invoice lines (ZOHO_ITEM_ID) and each client as a customer in their billing currency.',
+      'Ledger mode: copy your receiving account details from Skydo dashboard > International Accounts into SKYDO_RECEIVING_ACCOUNTS.',
       'Download the FIRA for each received payment from the dashboard for GST/export compliance.',
     ],
-    trustNote: 'Skydo has no public API or webhooks; payment confirmation is in the Skydo dashboard (or Zoho Books if connected).',
+    trustNote: 'Skydo has no public API or webhooks: status comes from the Zoho invoice Skydo marks paid, or from receipts an admin records in the ledger.',
   },
 };
 

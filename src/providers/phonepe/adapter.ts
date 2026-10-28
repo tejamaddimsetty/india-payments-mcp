@@ -168,6 +168,18 @@ function toMetaInfo(metadata: Record<string, string> | undefined): Record<string
       hint: 'Name keys udf1..udf5 explicitly, or pack several values into one.',
     });
   }
+  // Initiate Payment reference: udf1-10 max 256 chars, no charset rule; udf11-15 max 50 chars of
+  // alphanumerics plus _-+@.
+  for (const [k, v] of Object.entries(out)) {
+    const n = Number(k.slice(3));
+    const ok = n <= 10 ? v.length <= 256 : /^[A-Za-z0-9_\-+@.]{0,50}$/.test(v);
+    if (!ok) {
+      throw new PaymentError('VALIDATION', `PhonePe metaInfo.${k} is invalid: ${n <= 10 ? 'max 256 characters' : 'max 50 characters of letters, digits and _-+@.'}.`, {
+        provider: 'phonepe',
+        hint: n <= 10 ? 'Shorten the value.' : 'udf11..udf15 are restricted; put free text in udf1..udf10 instead.',
+      });
+    }
+  }
   return out;
 }
 
@@ -317,8 +329,8 @@ class PhonepeGateway implements PaymentGateway {
       ...(input.customer?.phone ? { prefillUserLoginDetails: { phoneNumber: input.customer.phone } } : {}),
       ...extra,
     };
-    // /checkout/v2/pay is not idempotent (re-using a progressed merchantOrderId is a
-    // BAD_REQUEST), so it is never auto-retried on network errors.
+    // /checkout/v2/pay is not documented as idempotent (re-using a progressed merchantOrderId is
+    // assumed to be rejected, not replayed), so it is never auto-retried on network errors.
     const { data } = await this.call<PpCreateResponse>('POST', '/checkout/v2/pay', 'create_payment', body);
 
     return {
@@ -481,9 +493,18 @@ class PhonepeGateway implements PaymentGateway {
     } catch {
       throw new PaymentError('VALIDATION', 'PhonePe webhook body is not valid JSON.', { provider: 'phonepe' });
     }
-    // `event` is current; `type` is deprecated but still sent.
-    const event = body.event ?? body.type ?? 'unknown';
-    const p = body.payload ?? ({ state: '' } as NonNullable<typeof body.payload>);
+    // Some documented refund-completed samples (UPI, net banking) are flat: no event/payload
+    // wrapper and no merchantRefundId. Fall back to the top-level body when payload is absent.
+    type Payload = NonNullable<typeof body.payload>;
+    const flat = body.payload === undefined && body !== null && typeof body === 'object' && ('state' in body || 'refundId' in body);
+    const p: Payload = body.payload ?? (flat ? (body as unknown as Payload) : ({ state: '' } as Payload));
+    // `event` is current; `type` is deprecated but still sent. A flat refund body carries neither,
+    // so the event is inferred from its state.
+    const flatRefund = flat && (p.refundId !== undefined || p.originalMerchantOrderId !== undefined);
+    const event =
+      body.event ??
+      body.type ??
+      (flatRefund && p.state === 'COMPLETED' ? 'pg.refund.completed' : flatRefund && p.state === 'FAILED' ? 'pg.refund.failed' : 'unknown');
     const typeMap: Record<string, WebhookEventType> = {
       'checkout.order.completed': 'payment.succeeded',
       'checkout.order.failed': 'payment.failed',
@@ -491,7 +512,7 @@ class PhonepeGateway implements PaymentGateway {
       'pg.refund.failed': 'refund.failed',
     };
     const type = typeMap[event] ?? 'unknown';
-    const isRefund = event.startsWith('pg.refund.') || p.merchantRefundId !== undefined;
+    const isRefund = event.startsWith('pg.refund.') || p.merchantRefundId !== undefined || flatRefund;
     const latest = latestAttempt(p.paymentDetails);
 
     // IMPORTANT: the Authorization header proves the sender knows the shared secret, but it does

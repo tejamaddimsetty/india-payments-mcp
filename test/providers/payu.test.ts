@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PaymentError } from '../../src/core/errors.js';
 import { sha512Hex } from '../../src/core/crypto.js';
-import { mapPayuStatus, payu, payuApiHash, payuRequestHash, payuResponseHash, PAYU_URLS } from '../../src/providers/payu/adapter.js';
+import { mapPayuRefundStatus, mapPayuStatus, payu, payuApiHash, payuRequestHash, payuResponseHash, PAYU_URLS } from '../../src/providers/payu/adapter.js';
+import { silentLogger } from '../../src/core/logger.js';
 import { fakeFetch, testContext } from '../helpers.js';
 
 const KEY = 'gtKFFx';
@@ -59,6 +60,11 @@ describe('payu hashes', () => {
     expect(payuResponseHash(p, KEY, SALT)).toBe(sha512Hex(`10.00|${SALT}|success|||||||||||e|f|p|1.00|T|${KEY}`));
   });
 
+  it('reverse hash also reads additionalCharges (webhook spelling)', () => {
+    const p = { additionalCharges: '10.00', status: 'success', txnid: 'T', amount: '1.00', productinfo: 'p', firstname: 'f', email: 'e' };
+    expect(payuResponseHash(p, KEY, SALT)).toBe(sha512Hex(`10.00|${SALT}|success|||||||||||e|f|p|1.00|T|${KEY}`));
+  });
+
   it('postservice hash only covers var1', () => {
     expect(payuApiHash(KEY, 'verify_payment', 'TXN001', SALT)).toBe(sha512Hex(`${KEY}|verify_payment|TXN001|${SALT}`));
   });
@@ -112,6 +118,32 @@ describe('payu createPayment', () => {
     await expect(gw.createPayment({ ...base, returnUrl: undefined })).rejects.toMatchObject({ code: 'VALIDATION' });
   });
 
+  it('enforces txnid <= 25 characters (M1)', async () => {
+    const { gw } = gateway();
+    await expect(gw.createPayment({ ...base, orderRef: 'T'.repeat(26) })).rejects.toMatchObject({ code: 'VALIDATION', message: expect.stringMatching(/txnid/) });
+    await expect(gw.createPayment({ ...base, orderRef: 'T'.repeat(25) })).resolves.toMatchObject({ orderRef: 'T'.repeat(25) });
+  });
+
+  it('enforces productinfo / firstname / email / udf limits (M2)', async () => {
+    const { gw } = gateway();
+    await expect(gw.createPayment({ ...base, description: 'p'.repeat(101) })).rejects.toMatchObject({ code: 'VALIDATION', message: expect.stringMatching(/productinfo/) });
+    await expect(gw.createPayment({ ...base, customer: { ...base.customer, name: 'n'.repeat(61) } })).rejects.toMatchObject({ message: expect.stringMatching(/firstname/) });
+    await expect(gw.createPayment({ ...base, customer: { ...base.customer, email: `${'e'.repeat(45)}@x.com` } })).rejects.toMatchObject({ message: expect.stringMatching(/email/) });
+    await expect(gw.createPayment({ ...base, metadata: { a: 'u'.repeat(256) } })).rejects.toMatchObject({ message: expect.stringMatching(/udf1/) });
+    await expect(gw.createPayment({ ...base, description: 'p'.repeat(100), metadata: { a: 'u'.repeat(255) } })).resolves.toBeDefined();
+  });
+
+  it('only warns about surl/furl longer than 50 characters (M2)', async () => {
+    const warn = vi.fn();
+    const ctx = { ...testContext('payu', fakeFetch([]).fetch), logger: { ...silentLogger, warn } };
+    const gw = payu.create({ key: KEY, salt: SALT }, ctx);
+    const returnUrl = `https://shop.example/${'x'.repeat(60)}`;
+    const res = await gw.createPayment({ ...base, returnUrl });
+    expect(res.checkout.type === 'form_post' && res.checkout.fields.surl).toBe(returnUrl);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls[0]![0]).toMatch(/surl/);
+  });
+
   it('rejects more than 5 metadata values', async () => {
     const { gw } = gateway();
     const metadata = { a: '1', b: '2', c: '3', d: '4', e: '5', f: '6' };
@@ -161,6 +193,13 @@ describe('payu verifyPayment', () => {
 });
 
 describe('payu status mapping', () => {
+  it('maps refund states, including od_hit / processing / in_progress (M4)', () => {
+    for (const s of ['QUEUED', 'REQUESTED', 'IN PROGRESS', 'in_progress', 'processing', 'od_hit']) expect(mapPayuRefundStatus(s)).toBe('pending');
+    expect(mapPayuRefundStatus('SUCCESS')).toBe('processed');
+    expect(mapPayuRefundStatus('FAILURE')).toBe('failed');
+    expect(mapPayuRefundStatus('mystery')).toBe('unknown');
+  });
+
   it('maps top-level and unmapped statuses', () => {
     expect(mapPayuStatus('success', 'captured')).toBe('captured');
     expect(mapPayuStatus('success', 'auth')).toBe('authorized');
@@ -224,6 +263,12 @@ describe('payu refunds', () => {
     expect(body.get('hash')).toBe(payuApiHash(KEY, 'cancel_refund_transaction', '403993715531077182', SALT));
   });
 
+  it('uses txn_update_id when cancelling an authorised payment (M3)', async () => {
+    const { gw } = gateway([{ match: 'postservice', body: { status: 1, msg: 'Cancel Request Queued', txn_update_id: '130165999', mihpayid: '1' } }]);
+    const r = await gw.refund!({ orderRef: 'T', providerPaymentId: '1', refundRef: 'R', amount: 100 });
+    expect(r.providerRefundId).toBe('130165999');
+  });
+
   it('validates refundRef length', async () => {
     const { gw } = gateway();
     await expect(gw.refund!({ orderRef: 'T', providerPaymentId: '1', refundRef: 'x'.repeat(24), amount: 100 })).rejects.toMatchObject({ code: 'VALIDATION' });
@@ -243,6 +288,30 @@ describe('payu refunds', () => {
     const r = await gw.getRefundStatus!({ refundRef: 'RF-1', providerRefundId: '130165813' });
     expect(r).toMatchObject({ status: 'processed', amount: 10000 });
     expect(new URLSearchParams(requests[0]!.body).get('command')).toBe('check_action_status');
+  });
+
+  it('reads the documented nested sample (request_id twice, amt, uppercase status)', async () => {
+    const { gw } = gateway([
+      {
+        match: 'postservice',
+        body: { status: 1, msg: 'Refund Details', transaction_details: { '130165813': { '130165813': { mihpayid: '403993715531077182', request_id: '130165813', amt: '10.00', action: 'refund', status: 'QUEUED' } } } },
+      },
+    ]);
+    const r = await gw.getRefundStatus!({ refundRef: 'RF-1', providerRefundId: '130165813' });
+    expect(r).toMatchObject({ status: 'pending', amount: 1000 });
+  });
+
+  it('reads the flat OpenAPI sample (refund_status / refund_amount)', async () => {
+    const { gw } = gateway([
+      { match: 'postservice', body: { status: 1, msg: 'ok', request_id: '130165813', mihpayid: '403993715531077182', refund_status: 'success', refund_amount: '100.00', bank_ref_no: 'B', mode: 'CC' } },
+    ]);
+    const r = await gw.getRefundStatus!({ refundRef: 'RF-1', providerRefundId: '130165813' });
+    expect(r).toMatchObject({ status: 'processed', amount: 10000 });
+  });
+
+  it('throws when check_action_status finds nothing', async () => {
+    const { gw } = gateway([{ match: 'postservice', body: { status: 0, msg: '0 out of 1', transaction_details: { '130165813': 'No action status found' } } }]);
+    await expect(gw.getRefundStatus!({ refundRef: 'RF-1', providerRefundId: '130165813' })).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
   });
 });
 
@@ -273,6 +342,10 @@ describe('payu webhooks', () => {
 });
 
 describe('payu module', () => {
+  it('reports refundStatus as supported', () => {
+    expect(payu.capabilities.features.refundStatus.support).toBe('supported');
+  });
+
   it('requires key and salt', () => {
     expect(() => payu.create({ key: KEY }, testContext('payu', fakeFetch([]).fetch))).toThrow(/PAYU_MERCHANT_SALT/);
   });

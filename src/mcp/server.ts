@@ -201,13 +201,14 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
         payload: z.record(z.string(), z.string()).describe('Callback fields exactly as received'),
         order_ref: ref.describe('The order you expect this callback to be for (from your own database)'),
         expected_amount: paise.describe('The amount you stored for that order, in paise'),
+        provider_order_id: z.string().optional().describe('providerOrderId you stored from payments_create_payment (Razorpay order_/sub_ id). Recommended.'),
         include_raw: includeRaw,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async (a) =>
       run(async () =>
-        slim(await client.verifyPayment(a.provider, { payload: a.payload, orderRef: a.order_ref, expectedAmount: a.expected_amount }), a.include_raw),
+        slim(await client.verifyPayment(a.provider, { payload: a.payload, orderRef: a.order_ref, expectedAmount: a.expected_amount, providerOrderId: a.provider_order_id }), a.include_raw),
       ),
   );
 
@@ -444,6 +445,38 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
       annotations: { readOnlyHint: true },
     },
     async (a) => run(() => generateIntegration({ provider: a.provider, framework: a.framework, features: a.features })),
+  );
+
+  // ---------- Skydo (no API: Zoho Books bridge or receiving accounts + ledger) ----------
+
+  server.registerTool(
+    'payments_skydo_record_payment',
+    {
+      title: 'Skydo: record a received payment',
+      description:
+        'Skydo ledger mode only. Skydo has no API, so when Skydo notifies you (email/WhatsApp/dashboard) that money for an order arrived, record it here. Amount is in minor units of the invoice currency (cents). Partial receipts keep the order pending.',
+      inputSchema: {
+        order_ref: ref,
+        amount_received: z.number().int().positive().describe('Minor units of the invoice currency, e.g. USD 1,000.00 = 100000'),
+        received_at: z.string().optional().describe('ISO date/time; default now'),
+        fira_number: z.string().max(100).optional(),
+        note: z.string().max(500).optional(),
+      },
+      annotations: { destructiveHint: false, idempotentHint: false },
+    },
+    async (a) =>
+      run(() => client.skydoRecordPayment({ orderRef: a.order_ref, amountReceived: a.amount_received, receivedAt: a.received_at, firaNumber: a.fira_number, note: a.note })),
+  );
+
+  server.registerTool(
+    'payments_skydo_outstanding',
+    {
+      title: 'Skydo: outstanding payments',
+      description: 'Skydo ledger mode: list orders still waiting for money (oldest first), to chase clients or reconcile against Skydo\'s Reports export.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => run(() => client.skydoOutstanding()),
   );
 
   server.registerTool(

@@ -44,8 +44,21 @@ const STRIPE_JS = 'https://js.stripe.com/v3/';
  * Pinned so response shapes don't drift with the account's default version. "basil" moved
  * invoice.subscription to invoice.parent.subscription_details.subscription; the code below reads both.
  * Webhook payloads are NOT affected by this header: they use the endpoint's configured version.
+ * Deliberately kept on basil (verified valid 2026-10-29) although newer versions exist (e.g.
+ * 2026-09-30.endive): later versions rename Checkout `ui_mode` values and may change other shapes
+ * read here. Re-check invoice/Checkout/ui_mode field usage before bumping.
  */
 export const STRIPE_API_VERSION = '2025-03-31.basil';
+/** "Idempotency keys are up to 255 characters long." (docs.stripe.com/api/idempotent_requests) */
+export const STRIPE_MAX_IDEMPOTENCY_KEY = 255;
+/** Checkout Session client_reference_id: "The maximum length is 200 characters." */
+export const STRIPE_MAX_CLIENT_REFERENCE_ID = 200;
+
+function assertClientReferenceId(ref: string, field: string): void {
+  if (ref.length > STRIPE_MAX_CLIENT_REFERENCE_ID) {
+    throw new PaymentError('VALIDATION', `${field} is ${ref.length} characters; Stripe client_reference_id allows at most ${STRIPE_MAX_CLIENT_REFERENCE_ID}.`, { provider: 'stripe' });
+  }
+}
 /** Stripe's own libraries default to 300 s. Never 0. */
 export const STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
 /** The only values Stripe accepts for refund `reason`. */
@@ -303,6 +316,8 @@ class StripeGateway implements PaymentGateway {
    * Every POST carries an Idempotency-Key (Stripe de-duplicates on it for 24 h), so POSTs are
    * always retry-safe here. Callers pass a natural key (orderRef / refundRef) when there is one;
    * otherwise a random key still makes the HTTP client's own retries of *this* call safe.
+   * Note: Stripe replays the saved response for a reused key, including a 500, so a retry after a
+   * 5xx returns the same 500; the retries that actually help are network errors/timeouts and 409/429.
    */
   private call<T>(
     method: 'GET' | 'POST' | 'DELETE',
@@ -311,7 +326,16 @@ class StripeGateway implements PaymentGateway {
     opts: { body?: Record<string, unknown>; query?: URLSearchParams; idempotencyKey?: string } = {},
   ) {
     const headers: Record<string, string> = { Authorization: this.auth, 'Stripe-Version': STRIPE_API_VERSION };
-    if (method === 'POST') headers['Idempotency-Key'] = opts.idempotencyKey ?? randomUUID();
+    if (method === 'POST') {
+      const key = opts.idempotencyKey ?? randomUUID();
+      if (key.length > STRIPE_MAX_IDEMPOTENCY_KEY) {
+        throw new PaymentError('VALIDATION', `Stripe Idempotency-Key for ${operation} is ${key.length} characters; Stripe allows at most ${STRIPE_MAX_IDEMPOTENCY_KEY}.`, {
+          provider: 'stripe',
+          hint: 'Shorten orderRef / refundRef / subscriptionRef or pass a shorter idempotencyKey.',
+        });
+      }
+      headers['Idempotency-Key'] = key;
+    }
     const qs = opts.query && [...opts.query].length ? `?${opts.query}` : '';
     return this.http.request<T>({
       method,
@@ -337,6 +361,7 @@ class StripeGateway implements PaymentGateway {
       throw new PaymentError('VALIDATION', `Unknown providerOptions.flow "${String(flow)}". Use 'checkout_session' (default) or 'payment_intent'.`, { provider: 'stripe' });
     }
 
+    assertClientReferenceId(input.orderRef, 'orderRef');
     if (!input.returnUrl) {
       throw new PaymentError('VALIDATION', 'Stripe Checkout needs returnUrl (used for success_url and cancel_url).', {
         provider: 'stripe',
@@ -709,16 +734,16 @@ class StripeGateway implements PaymentGateway {
     }
 
     if (t === 'charge.refunded') {
-      // Fires when a refund is created, possibly before it settles; refund.updated carries the
-      // final state and our refund_ref. The charge no longer embeds its refunds list.
+      // Fires whenever a refund is created (including partial ones), often while the refund is still
+      // `pending` (UPI refunds settle asynchronously), and amount_refunded is cumulative, not this
+      // refund's amount. So it is NOT a refund.processed signal: subscribe to refund.updated /
+      // refund.failed, which carry the final status and our refund_ref. Informational only here.
       const c = obj as unknown as StripeCharge;
       return {
         ...base,
-        type: 'refund.processed',
+        type: 'unknown',
         orderRef: md.order_ref,
         providerPaymentId: c.payment_intent ?? c.id,
-        status: withRefunds('captured', c),
-        amount: c.amount_refunded,
         currency: upper(c.currency),
       };
     }
@@ -864,6 +889,7 @@ class StripeGateway implements PaymentGateway {
    * cards/UPI, registers the RBI e-mandate with AFA) and creates the subscription on completion.
    */
   async createSubscription(input: CreateSubscriptionInput): Promise<SubscriptionResult> {
+    assertClientReferenceId(input.subscriptionRef, 'subscriptionRef');
     if (!input.returnUrl) {
       throw new PaymentError('VALIDATION', 'Stripe subscriptions via Checkout need returnUrl.', { provider: 'stripe' });
     }

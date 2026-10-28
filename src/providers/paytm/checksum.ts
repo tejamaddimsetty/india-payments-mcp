@@ -2,7 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { safeEqual } from '../../core/crypto.js';
 
 /**
- * Port of Paytm's official checksum library (github.com/paytm/Paytm_Node_Checksum, PaytmChecksum.js).
+ * Port of Paytm's official checksum library (github.com/paytm/Paytm_Node_Checksum, PaytmChecksum.js;
+ * same code as npm paytmchecksum@1.5.1), cross-checked against the PHP and Python libraries.
  *
  *   salt      = base64(3 random bytes)                      -> 4 chars
  *   hash      = sha256hex(params + "|" + salt) + salt
@@ -10,6 +11,9 @@ import { safeEqual } from '../../core/crypto.js';
  *
  * `params` is either a string (JSON APIs sign the exact `JSON.stringify(body)` that is sent) or a
  * flat object (form callbacks/webhooks: values sorted by key, joined with "|", null/"null" -> "").
+ * The "null" string rule follows Paytm_PHP_Checksum (`strtolower($value) !== "null"`) and
+ * Paytm_Python_Checksum (`.lower() != "null"`). The Node library compares `toLowerCase() !== null`,
+ * which is always true, so it keeps the literal "null"; that is a bug in the Node lib, not the rule.
  *
  * Differences from the official lib, all deliberate:
  * - Synchronous (the official generateSignature returns a Promise for no real reason).
@@ -33,7 +37,7 @@ function decrypt(encrypted: string, key: string): string {
   return decipher.update(encrypted, 'base64', 'binary') + decipher.final('binary');
 }
 
-/** Official getStringByParams: values ordered by sorted key, joined with "|". */
+/** Official getStringByParams: values ordered by sorted key, joined with "|" ("null" handling per the PHP/Python libs). */
 export function paytmStringByParams(params: Record<string, unknown>): string {
   return Object.keys(params)
     .sort()
@@ -81,4 +85,87 @@ export function verifySignature(params: PaytmParams, key: string, checksum: stri
   if (paytmHash.length < 5) return false;
   const salt = paytmHash.slice(-4);
   return safeEqual(paytmHash, calculateHash(toParamString(params, true), salt));
+}
+
+/**
+ * Return the exact source text of a top-level member of a JSON object, without re-serialising.
+ * Paytm signs `body` as the exact bytes it sent, so a response or webhook must be verified against
+ * the raw `"body":{...}` substring, never JSON.stringify(JSON.parse(...).body).
+ * Scans balanced braces/brackets and skips over strings (including escaped quotes). Returns
+ * undefined if the input is not a JSON object or the key is absent.
+ */
+export function extractRawJsonMember(raw: string, key: string): string | undefined {
+  const n = raw.length;
+  let i = 0;
+  const skipWs = () => {
+    while (i < n && (raw[i] === ' ' || raw[i] === '\n' || raw[i] === '\r' || raw[i] === '\t')) i++;
+  };
+  /** raw[i] must be '"'; leaves i just past the closing quote. */
+  const scanString = (): boolean => {
+    i++;
+    while (i < n) {
+      const c = raw[i];
+      if (c === '\\') {
+        i += 2;
+        continue;
+      }
+      i++;
+      if (c === '"') return true;
+    }
+    return false;
+  };
+  const scanValue = (): boolean => {
+    const c = raw[i];
+    if (c === '"') return scanString();
+    if (c === '{' || c === '[') {
+      let depth = 0;
+      while (i < n) {
+        const ch = raw[i];
+        if (ch === '"') {
+          if (!scanString()) return false;
+          continue;
+        }
+        if (ch === '{' || ch === '[') depth++;
+        else if (ch === '}' || ch === ']') {
+          depth--;
+          if (depth === 0) {
+            i++;
+            return true;
+          }
+        }
+        i++;
+      }
+      return false;
+    }
+    const start = i;
+    while (i < n && !/[,}\]\s]/.test(raw[i]!)) i++;
+    return i > start;
+  };
+
+  skipWs();
+  if (raw[i] !== '{') return undefined;
+  i++;
+  for (;;) {
+    skipWs();
+    if (raw[i] !== '"') return undefined; // '}' (empty / end) or malformed
+    const keyStart = i;
+    if (!scanString()) return undefined;
+    const keyText = raw.slice(keyStart, i);
+    skipWs();
+    if (raw[i] !== ':') return undefined;
+    i++;
+    skipWs();
+    const valueStart = i;
+    if (!scanValue()) return undefined;
+    let name: unknown;
+    try {
+      name = JSON.parse(keyText);
+    } catch {
+      return undefined;
+    }
+    if (name === key) return raw.slice(valueStart, i);
+    skipWs();
+    if (raw[i] !== ',') return undefined;
+    i++;
+  }
 }

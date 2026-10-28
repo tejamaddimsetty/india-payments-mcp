@@ -257,33 +257,6 @@ export function shopifyReconcileServer(ctx: TemplateContext): string {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Skydo
-// ---------------------------------------------------------------------------------------------
-
-export function skydoGuide(cap: ProviderCapabilities, framework: string): string {
-  return lines(
-    `# Collecting international payments with Skydo`,
-    ``,
-    `Skydo has **no public developer API, SDK or webhooks** (checked ${cap.lastVerified}). There is nothing to integrate in`,
-    `${framework === 'other' ? 'your code' : `a ${framework} project`}, and this generator deliberately does not produce code that pretends otherwise.`,
-    ``,
-    `## What to do instead`,
-    ``,
-    `1. **Payment links (InstaLinks):** create one in the Skydo dashboard per invoice (or a reusable one per client), in the client's currency, and put it on your invoice or send it by email.`,
-    `2. **Global bank account details:** share your Skydo local receiving account (US/UK/EU/CA/AU and more) with clients who prefer bank transfers.`,
-    `3. **Zoho Books:** connect Skydo to Zoho Books so invoices sync and are marked paid automatically. No QuickBooks/Xero/Zapier integration was found.`,
-    `4. **Compliance:** download the FIRA for every received payment (needed for GST export-of-services and income tax).`,
-    ``,
-    `## If you need programmatic checkout`,
-    ``,
-    `Use a gateway with an API and export support (ask \`payments_recommend_gateway\` with needs \`["international"]\`, typically Razorpay or Stripe),`,
-    `and keep Skydo for invoice-and-transfer clients. If your app must record Skydo payments, add a manual "mark paid" admin action that stores the Skydo transaction reference and FIRA number.`,
-    ``,
-    cap.constraints.length ? lines(`## Constraints`, ``, ...cap.constraints.map((c) => `- ${oneLine(c)}`), ``) : false,
-  );
-}
-
-// ---------------------------------------------------------------------------------------------
 // Language-agnostic spec ("other")
 // ---------------------------------------------------------------------------------------------
 

@@ -81,6 +81,10 @@ describe('security regressions', () => {
     expect((await c.verifyPayment('razorpay', { payload })).paid).toBe(false);
     expect((await c.verifyPayment('razorpay', { payload, orderRef: 'BIG_ORDER', expectedAmount: 100 })).paid).toBe(false);
     expect((await c.verifyPayment('razorpay', { payload, orderRef: 'CHEAP_1', expectedAmount: 100 })).paid).toBe(true);
+    // Bound by the server-stored order id: a genuine cheap-order callback cannot pay the big order.
+    expect((await c.verifyPayment('razorpay', { payload, providerOrderId: 'order_BIG', expectedAmount: 100 })).paid).toBe(false);
+    expect((await c.verifyPayment('razorpay', { payload: { ...payload, razorpay_order_id: undefined as never }, providerOrderId: 'order_BIG', expectedAmount: 100 })).paid).toBe(false);
+    expect((await c.verifyPayment('razorpay', { payload, providerOrderId: 'order_CHEAP', orderRef: 'CHEAP_1', expectedAmount: 100 })).paid).toBe(true);
   });
 
   it('webhook: a retry that arrives while the first delivery is processing gets 409, not 200', async () => {

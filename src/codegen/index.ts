@@ -12,7 +12,8 @@ import type { ProviderCapabilities } from '../core/capabilities.js';
 import type { ProviderId } from '../core/types.js';
 import { PROVIDERS } from '../providers/index.js';
 import { jsSdkFor, startCheckoutModule } from './templates/browser.js';
-import { mobileGuide, otherSpec, shopifyGuide, shopifyReconcileServer, skydoGuide } from './templates/docs.js';
+import { mobileGuide, otherSpec, shopifyGuide, shopifyReconcileServer } from './templates/docs.js';
+import { skydoFiles, skydoGuide } from './templates/skydo.js';
 import { expressFiles } from './templates/express.js';
 import { fastifyFiles } from './templates/fastify.js';
 import { htmlFiles } from './templates/html.js';
@@ -205,19 +206,24 @@ function testChecklist(ctx: TemplateContext, fw: Framework): string[] {
 function skydo(ctx: TemplateContext, framework: Framework, warnings: string[]): GeneratedIntegration {
   const { cap } = ctx;
   warnings.push(
-    'Skydo has no public developer API, SDK or webhooks. No code was generated on purpose: anything claiming to call a Skydo API would be fake. Use dashboard payment links (InstaLinks) and the Zoho Books integration.',
+    'Skydo has no public developer API, SDK or webhooks. The generated code never calls Skydo: it uses Skydo\'s native Zoho Books integration (automatic) or your Skydo receiving-account details plus a ledger an admin updates. There is no website checkout, no INR, no cards/UPI and no API refunds.',
   );
+  if (framework === 'shopify') warnings.push('Skydo has no Shopify payments app; this is a standalone invoicing backend.');
+  const env = envFile(ctx);
+  env.contents += '\n# Admin token for recording receipts / polling routes. Replace with your real auth.\nADMIN_API_TOKEN=\n';
   return {
     provider: cap.provider,
     framework,
-    summary: 'Skydo guide only: payment links from the dashboard, Zoho Books sync, FIRA downloads. No code, because Skydo has no public API.',
-    files: [{ path: 'docs/SKYDO_PAYMENTS.md', language: 'markdown', contents: skydoGuide(cap, framework) }],
-    envVars: [],
+    summary:
+      'Skydo export collections: invoice via the Zoho Books bridge (Skydo marks it paid and attaches the FIRA) or bank-transfer instructions + ledger, status refresh/polling instead of webhooks, and an admin receipt route.',
+    files: [...skydoFiles(framework), env, { path: 'docs/SKYDO_PAYMENTS.md', language: 'markdown', contents: skydoGuide(cap) }],
+    envVars: [...envVarsFor(ctx), 'ADMIN_API_TOKEN'],
     dashboardSteps: dashboardStepsFor(cap, ctx.features),
     testChecklist: [
-      'Create a small InstaLink in your own currency and pay it from a foreign card or account you control.',
-      'Confirm the INR settlement lands in your bank account and the FIRA is downloadable.',
-      'If Zoho Books is connected, confirm the invoice was marked paid automatically.',
+      'PAYMENTS_MODE=mock: call POST /api/skydo/invoices, then payments_mock_complete_payment (provider skydo) and GET /api/skydo/invoices/:orderRef -> captured, onPaid runs once.',
+      'Ledger mode: set SKYDO_RECEIVING_ACCOUNTS, create an invoice, check the instructions show the right account for the currency and the order id as reference; record a short receipt (stays pending), then the rest (captured).',
+      'Zoho bridge: create one real invoice for a test client in Zoho, confirm it appears in the Skydo dashboard within ~10 minutes, then have a small real payment (>= USD 50) sent and confirm Zoho shows it paid with the FIRA attached and pollUnpaid() fulfils it.',
+      'Restart the server and confirm the ledger file kept its state.',
     ],
     warnings,
   };

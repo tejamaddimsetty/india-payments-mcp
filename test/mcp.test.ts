@@ -37,7 +37,7 @@ describe('MCP server', () => {
 
   it('returns structured errors, not exceptions', async () => {
     const client = await connect();
-    const res = await client.callTool({ name: 'payments_create_payment', arguments: { provider: 'skydo', order_ref: 'mcp_2', amount: 100 } });
+    const res = await client.callTool({ name: 'payments_create_customer', arguments: { provider: 'phonepe', name: 'x' } });
     expect(res.isError).toBe(true);
     expect(json(res).error).toBe('UNSUPPORTED');
   });

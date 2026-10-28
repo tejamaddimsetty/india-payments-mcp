@@ -19,6 +19,8 @@ export interface PaymentsConfig {
 
 export type Env = Record<string, string | undefined>;
 
+const PLACEHOLDER = /replace-me|x{8,}|<[^>]+>/i;
+
 export function parseMode(value: string | undefined): PaymentsMode {
   const v = (value ?? 'sandbox').trim().toLowerCase();
   if (v === 'mock' || v === 'sandbox' || v === 'live') return v;
@@ -37,7 +39,8 @@ export function loadConfigFromEnv(env: Env, catalog: ProviderCapabilities[]): Pa
     const creds: Record<string, string | undefined> = {};
     for (const spec of cap.credentials) {
       const v = env[spec.env];
-      creds[spec.key] = v && v.trim() !== '' ? v.trim() : undefined;
+      // Treat template placeholders as unset so `doctor` does not report them as configured.
+      creds[spec.key] = v && v.trim() !== '' && !PLACEHOLDER.test(v) ? v.trim() : undefined;
     }
     credentials[cap.provider] = creds;
   }

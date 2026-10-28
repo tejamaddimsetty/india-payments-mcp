@@ -21,7 +21,8 @@ export const razorpayCapabilities: ProviderCapabilities = {
     payouts: featureRow('not_implemented', 'Payouts are a separate product (RazorpayX) with separate keys and a current account.'),
     paymentLinks: featureRow('not_implemented', 'Available via POST /v1/payment_links; pass through with your own call for now.'),
   },
-  paymentMethods: ['upi', 'card', 'netbanking', 'wallet', 'emi', 'cardless_emi', 'paylater'],
+  // `method` values documented on the payment entity (https://razorpay.com/docs/api/payments/fetch-with-id/).
+  paymentMethods: ['upi', 'card', 'netbanking', 'wallet', 'emi', 'paylater'],
   currencies: 'INR plus 100+ currencies for international cards (must be enabled on the account).',
   checkoutTypes: ['js_sdk', 'redirect'],
   providerAmountFormat: 'Integer paise (same as ours).',
@@ -29,6 +30,7 @@ export const razorpayCapabilities: ProviderCapabilities = {
     { env: 'RAZORPAY_KEY_ID', key: 'keyId', required: true, secret: false, description: 'rzp_test_... or rzp_live_... (Dashboard > Account & Settings > API Keys)' },
     { env: 'RAZORPAY_KEY_SECRET', key: 'keySecret', required: true, secret: true, description: 'Key secret shown once when the key is generated.' },
     { env: 'RAZORPAY_WEBHOOK_SECRET', key: 'webhookSecret', required: false, secret: true, description: 'Secret you typed when creating the webhook. Required to verify webhooks.' },
+    { env: 'RAZORPAY_MERCHANT_NAME', key: 'merchantName', required: false, secret: false, description: 'Business name shown on Checkout (Checkout option `name`, mandatory). Defaults to "Payment".' },
   ],
   constraints: [
     'Minimum amount is 100 paise (Rs 1).',
@@ -36,6 +38,10 @@ export const razorpayCapabilities: ProviderCapabilities = {
     'Order is "paid" only after capture. Enable auto-capture in Dashboard > Payment Capture, or capture via API, or payments auto-refund after the capture window.',
     'notes: max 15 key/value pairs, 256 chars each.',
     'Webhook secret is set per webhook in the dashboard; it is NOT the API key secret.',
+    'Checkout option `name` is mandatory: set RAZORPAY_MERCHANT_NAME to your business name (falls back to "Payment").',
+    'verifyPayment computes the signature with the order_/sub_ id YOU stored (pass providerOrderId), never the id Checkout returns. Without providerOrderId or orderRef the callback is rejected.',
+    'Daily subscription plans need interval >= 7.',
+    'customer_id cannot be set on create subscription; Razorpay fills it after authorisation (we keep yours in notes.customer_id).',
   ],
   officialSdks: {
     android: 'https://razorpay.com/docs/payments/payment-gateway/android-integration/',

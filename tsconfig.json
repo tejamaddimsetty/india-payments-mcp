@@ -16,7 +16,7 @@
     "outDir": "dist",
     "rootDir": "."
   },
-  "include": ["src", "test", "examples/**/*.ts"],
+  "include": ["src", "test", "scripts", "examples/**/*.ts"],
   // Framework examples need their own deps (@types/express, React/Next) and path aliases, so each has
   // its own tsconfig.json that maps india-payments-mcp to ../../src. Check them with
   // `npx tsc -p examples/<name>` after `npm install` in that folder.

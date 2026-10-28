@@ -30,7 +30,7 @@ export const stripeCapabilities: ProviderCapabilities = {
     customers: featureRow('supported', 'POST /v1/customers.'),
     subscriptions: featureRow(
       'partial',
-      'Checkout Session mode=subscription (inline price_data or providerPlanId = price_...). The returned providerSubscriptionId is the cs_ Session id until the customer completes Checkout; the real sub_ id arrives in checkout.session.completed / customer.subscription.created. Indian cards/UPI are bound by RBI e-mandate rules (see constraints).',
+      'Checkout Session mode=subscription (inline price_data or providerPlanId = price_...). The returned providerSubscriptionId is the cs_ Session id until the customer completes Checkout; the real sub_ id arrives in checkout.session.completed / customer.subscription.created. Indian cards (and UPI, on non-India accounts) are bound by RBI e-mandate rules (see constraints).',
     ),
     settlements: featureRow(
       'partial',
@@ -39,8 +39,10 @@ export const stripeCapabilities: ProviderCapabilities = {
     payouts: featureRow('not_implemented', 'Paying third parties needs Stripe Connect (connected accounts + transfers), which this adapter does not implement.'),
     paymentLinks: featureRow('not_implemented', 'Available via POST /v1/payment_links; pass through with your own call for now.'),
   },
-  // Cards are certain; UPI on Indian accounts is listed in Stripe's India docs. Netbanking/wallets not confirmed for India accounts.
-  paymentMethods: ['card', 'upi'],
+  // Indian Stripe accounts: cards. UPI is NOT available to India-domiciled accounts (IN is absent from
+  // the UPI "Business locations" list, https://docs.stripe.com/payments/upi); it is for non-India
+  // Stripe accounts charging Indian customers.
+  paymentMethods: ['card'],
   currencies:
     '135+ presentment currencies on Visa/Mastercard, INR/USD on Amex. Non-INR (export) charges need extra onboarding info and must be declared as exports (purpose codes, FIRC/eFIRA).',
   checkoutTypes: ['redirect', 'js_sdk'],
@@ -74,6 +76,10 @@ export const stripeCapabilities: ProviderCapabilities = {
     'Indian export rules: each export charge needs a description of the goods/services and the customer\'s name and billing address. This adapter sends payment_intent_data.description and sets billing_address_collection=required on Checkout; for the PaymentIntent flow pass options.billingDetails into stripe.confirmPayment.',
     'RBI e-mandate (recurring / off-session India cards and UPI): an e-mandate registered with AFA (3DS / UPI PIN) is required; a pre-debit notification must reach the customer >= 24 h before each debit, so Stripe holds card charges ~26 h (PaymentIntent sits in `processing`).',
     'RBI e-mandate: each recurring charge above Rs 15,000 needs fresh AFA from the customer, and UPI recurring above Rs 15,000 is not supported. Mandates cannot be updated or cancelled via the API.',
+    'Payment methods: Indian Stripe accounts accept cards. UPI is only offered to Stripe accounts outside India charging Indian customers (docs.stripe.com/payments/upi lists no IN business location).',
+    'Refunds: charge.refunded fires on refund creation (possibly still pending; amount_refunded is cumulative) and is reported as type "unknown". Use refund.updated (succeeded -> refund.processed, failed -> refund.failed) / refund.failed for the outcome.',
+    'Idempotency-Key max 255 chars and Checkout client_reference_id (orderRef / subscriptionRef) max 200 chars; longer values are rejected with VALIDATION before calling Stripe.',
+    'Retries: Stripe replays the saved response for a reused Idempotency-Key, including a 500. The client retries POSTs with the same key, which helps for network errors/timeouts and 409/429, but a 5xx will come back as the same 500: check status (getPaymentStatus / getRefundStatus) before re-submitting with a new key.',
     'Idempotency keys expire after 24 h. createPayment derives one from orderRef: re-calling with the same orderRef and different parameters fails with an idempotency error, so use a fresh orderRef per attempt.',
     'metadata: max 50 keys, key <= 40 chars, value <= 500 chars.',
     'Checkout Sessions expire (default 24 h). The success redirect carries only session_id and is unsigned: never mark an order paid from the redirect alone, call verifyPayment or rely on webhooks.',

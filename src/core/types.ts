@@ -116,6 +116,11 @@ export interface VerifyPaymentInput {
   orderRef?: string;
   /** Expected amount in minor units. When given, adapters must reject a mismatch. */
   expectedAmount?: number;
+  /**
+   * The provider order/subscription id YOU stored at createPayment time. Gateways whose signature
+   * covers this id (Razorpay) compute it from this value, never from the browser payload.
+   */
+  providerOrderId?: string;
   /** Callback/redirect params exactly as received (query string or POST form fields, or JS SDK handler response). */
   payload: Record<string, string>;
 }
@@ -144,7 +149,7 @@ export interface VerifyPaymentResult {
    * AES-encrypted response (CCAvenue), or a server-side status lookup because the redirect is
    * unsigned (Cashfree, PhonePe, Stripe).
    */
-  verifiedVia: 'signature' | 'status_api' | 'decryption';
+  verifiedVia: 'signature' | 'status_api' | 'decryption' | 'manual_record';
   raw?: unknown;
 }
 

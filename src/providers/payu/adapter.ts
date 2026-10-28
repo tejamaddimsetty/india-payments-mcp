@@ -44,6 +44,15 @@ export const PAYU_URLS = {
 const UDF_KEYS = ['udf1', 'udf2', 'udf3', 'udf4', 'udf5'] as const;
 const MAX_REFUND_REF = 23;
 
+/**
+ * Field length limits from the PayU "Additional Info for Payment APIs" table
+ * (docs.payu.in/reference/addl_info-payment-apis) and the official Node SDK (payu-india/payu-sdk-node),
+ * which throws for txnid > 25. Enforced as VALIDATION errors before the form is built.
+ */
+export const PAYU_FIELD_LIMITS = { txnid: 25, productinfo: 100, firstname: 60, email: 50, udf: 255 } as const;
+/** The addl table lists 50 chars for surl/furl. That looks stale (real callback URLs are often longer), so we only warn. */
+export const PAYU_URL_SOFT_LIMIT = 50;
+
 /** Fields that go into the request hash. Missing values hash as empty strings. */
 export interface PayuHashFields {
   key: string;
@@ -83,7 +92,9 @@ export function payuRequestHash(f: PayuHashFields, salt: string): string {
  */
 export function payuResponseHash(p: Record<string, string | undefined>, key: string, salt: string): string {
   const parts: string[] = [];
-  if (p.additional_charges) parts.push(p.additional_charges);
+  // The hash doc names it additional_charges; the webhook field table names it additionalCharges.
+  const addl = p.additional_charges ?? p.additionalCharges;
+  if (addl) parts.push(addl);
   parts.push(salt, p.status ?? '');
   if (p.splitInfo) parts.push(p.splitInfo);
   parts.push(
@@ -127,6 +138,8 @@ interface PayuRefundResponse {
   status: number;
   msg?: string;
   request_id?: string;
+  /** Cancel of an authorised (uncaptured) payment returns the request id here instead of request_id. */
+  txn_update_id?: string;
   mihpayid?: string;
   error_code?: string | number;
 }
@@ -147,11 +160,12 @@ export function mapPayuStatus(status: string | undefined, unmapped?: string): Pa
   return 'unknown';
 }
 
-function mapRefundStatus(s: string | undefined): RefundStatus {
+export function mapPayuRefundStatus(s: string | undefined): RefundStatus {
   const v = (s ?? '').toLowerCase();
   if (v === 'success' || v === 'processed' || v === 'refunded') return 'processed';
   if (v === 'failure' || v === 'failed' || v === 'cancelled') return 'failed';
-  if (v === 'queued' || v === 'pending' || v === 'requested' || v === 'in progress') return 'pending';
+  // od_hit (prose refund states), processing (OpenAPI refund_status enum), in_progress (UAT table).
+  if (['queued', 'pending', 'requested', 'in progress', 'in_progress', 'processing', 'od_hit'].includes(v)) return 'pending';
   return 'unknown';
 }
 
@@ -274,6 +288,7 @@ class PayuGateway implements PaymentGateway {
     for (const [k, v] of Object.entries(input.providerOptions ?? {})) {
       if (k !== 'hash' && v !== undefined && v !== null) fields[k] = String(v);
     }
+    this.validateFieldLengths(fields);
     // Hash last, over the final field values, so providerOptions overrides stay consistent.
     fields.hash = payuRequestHash(fields as unknown as PayuHashFields, this.creds.salt);
 
@@ -290,6 +305,31 @@ class PayuGateway implements PaymentGateway {
       // The hash is not secret (it travels through the browser), so the full field set is returned.
       raw: { ...fields },
     };
+  }
+
+  /** Checked on the final field values, so providerOptions overrides are covered too. */
+  private validateFieldLengths(fields: Record<string, string>): void {
+    const tooLong = (name: string, max: number) => {
+      const v = fields[name] ?? '';
+      if (v.length > max) {
+        throw new PaymentError('VALIDATION', `PayU ${name}${name === 'txnid' ? ' (orderRef)' : ''} must be at most ${max} characters; got ${v.length}.`, {
+          provider: 'payu',
+        });
+      }
+    };
+    tooLong('txnid', PAYU_FIELD_LIMITS.txnid);
+    tooLong('productinfo', PAYU_FIELD_LIMITS.productinfo);
+    tooLong('firstname', PAYU_FIELD_LIMITS.firstname);
+    tooLong('email', PAYU_FIELD_LIMITS.email);
+    UDF_KEYS.forEach((k) => tooLong(k, PAYU_FIELD_LIMITS.udf));
+    for (const k of ['surl', 'furl'] as const) {
+      const len = fields[k]?.length ?? 0;
+      if (len > PAYU_URL_SOFT_LIMIT) {
+        this.ctx.logger.warn(`PayU docs list a ${PAYU_URL_SOFT_LIMIT}-character limit for ${k}; this one is ${len}. Sent anyway: the limit looks stale, but shorten it if PayU rejects the form.`, {
+          provider: 'payu',
+        });
+      }
+    }
   }
 
   async verifyPayment(input: VerifyPaymentInput): Promise<VerifyPaymentResult> {
@@ -391,7 +431,7 @@ class PayuGateway implements PaymentGateway {
     return {
       provider: 'payu',
       refundRef: input.refundRef,
-      providerRefundId: data.request_id,
+      providerRefundId: data.request_id ?? data.txn_update_id,
       // "Refund Request Queued": PayU processes refunds asynchronously.
       status: 'pending',
       amount,
@@ -403,15 +443,17 @@ class PayuGateway implements PaymentGateway {
     if (!input.providerRefundId) {
       throw new PaymentError('VALIDATION', 'PayU refund status needs providerRefundId (the request_id returned by refund).', { provider: 'payu' });
     }
-    // Command name from community SDKs (PARTIAL in the facts doc). Response shape is nested as
-    // transaction_details.{request_id}.{mihpayid}.{status, amount, ...}; parsed defensively.
+    // check_action_status + var1=request_id, as in the docs prose (check_action_status_api_with_request_id)
+    // and the official PHP SDK (payu-intrepos/web-sdk-php checkRefundStatus). The docs show two response
+    // shapes: nested transaction_details.{request_id}.{request_id}.{status, amt, ...} (prose sample) and a
+    // flat {status: 1, request_id, refund_status, refund_amount} (OpenAPI sample). Both are handled.
     const { data } = await this.postservice<{ status?: number; msg?: string; transaction_details?: unknown } | string>(
       'check_action_status',
       [input.providerRefundId],
       'check_action_status',
       true,
     );
-    const detail = typeof data === 'object' ? findRefundDetail(data.transaction_details) : undefined;
+    const detail = typeof data === 'object' ? (flatRefundDetail(data as Record<string, unknown>) ?? findRefundDetail(data.transaction_details)) : undefined;
     if (!detail) {
       const msg = typeof data === 'object' ? data.msg : String(data).slice(0, 200);
       throw new PaymentError('PROVIDER_ERROR', `PayU check_action_status returned no refund details${msg ? `: ${msg}` : ''}`, {
@@ -425,7 +467,7 @@ class PayuGateway implements PaymentGateway {
       provider: 'payu',
       refundRef: input.refundRef,
       providerRefundId: input.providerRefundId,
-      status: mapRefundStatus(detail.status),
+      status: mapPayuRefundStatus(detail.status),
       amount: amount ? fromMajor(amount) : undefined,
       raw: data,
     };
@@ -508,6 +550,13 @@ interface PayuRefundDetail {
   status?: string;
   amount?: string;
   amt?: string;
+}
+
+/** OpenAPI sample shape: {status: 1, msg, request_id, mihpayid, refund_status, refund_amount, ...}. */
+function flatRefundDetail(data: Record<string, unknown>): PayuRefundDetail | undefined {
+  if (typeof data.refund_status !== 'string') return undefined;
+  const amt = data.refund_amount;
+  return { status: data.refund_status, amount: amt === undefined || amt === null ? undefined : String(amt) };
 }
 
 /** Walk the nested check_action_status payload and return the first object that has a status. */

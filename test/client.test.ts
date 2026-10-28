@@ -35,7 +35,8 @@ describe('PaymentsClient (mock mode)', () => {
 
   it('rejects unsupported features before any call, even in mock mode', async () => {
     const c = mockClient();
-    await expect(c.createPayment('skydo', { orderRef: 'ord_300', amount: 100 })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    await expect(c.createCustomer('phonepe', { name: 'x' })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    await expect(c.refund('skydo', { orderRef: 'ord_300', refundRef: 'rf_300' })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   });
 
   it('validates amounts and order refs uniformly', async () => {
@@ -90,7 +91,7 @@ describe('PaymentsClient (live safety rails)', () => {
 
   it('disables webhook simulation in live mode', async () => {
     const c = new PaymentsClient({ env });
-    expect(() => c.simulateWebhook('razorpay', { type: 'payment.succeeded', orderRef: 'ord_1', amount: 1 })).toThrow(/live/);
+    await expect(c.simulateWebhook('razorpay', { type: 'payment.succeeded', orderRef: 'ord_1', amount: 1 })).rejects.toThrow(/live/);
   });
 
   it('reports missing credentials without leaking values', () => {

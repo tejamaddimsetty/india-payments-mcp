@@ -34,10 +34,14 @@ export interface RazorpayCredentials {
   keyId?: string;
   keySecret?: string;
   webhookSecret?: string;
+  /** Business name shown on Checkout (RAZORPAY_MERCHANT_NAME). Checkout's `name` option is mandatory. */
+  merchantName?: string;
 }
 
 const BASE_URL = 'https://api.razorpay.com/v1';
 const CHECKOUT_JS = 'https://checkout.razorpay.com/v1/checkout.js';
+/** Fallback for Checkout's mandatory `name` option when RAZORPAY_MERCHANT_NAME is not set. */
+const DEFAULT_MERCHANT_NAME = 'Payment';
 
 /** Razorpay uses one host for test and live; the key prefix decides the environment. */
 export function razorpayPaymentSignature(orderId: string, paymentId: string, keySecret: string): string {
@@ -71,7 +75,7 @@ interface RzpPayment {
   currency: string;
   status: 'created' | 'authorized' | 'captured' | 'refunded' | 'failed';
   method: string;
-  refund_status: 'null' | 'partial' | 'full' | null;
+  refund_status: 'partial' | 'full' | null;
   error_description?: string | null;
   created_at: number;
 }
@@ -154,6 +158,7 @@ class RazorpayGateway implements PaymentGateway {
 
     const options: Record<string, unknown> = {
       key: this.creds.keyId,
+      name: this.creds.merchantName ?? DEFAULT_MERCHANT_NAME,
       order_id: order.id,
       amount: order.amount,
       currency: order.currency,
@@ -189,16 +194,30 @@ class RazorpayGateway implements PaymentGateway {
     const p = input.payload;
     const paymentId = p.razorpay_payment_id;
     const signature = p.razorpay_signature;
+    // Razorpay: compute the signature with the order/subscription id YOU stored, never the one
+    // Checkout returned (https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/build-integration/).
+    const stored = input.providerOrderId;
     // Strict id prefixes: the order and subscription signatures use the same key with fields in a
     // different order, so without these an order callback can be replayed as a subscription one.
     const bad = (reason: string): VerifyPaymentResult => ({ valid: false, status: 'unknown', verifiedVia: 'signature', reason, raw: p });
     if (paymentId !== undefined && !paymentId.startsWith('pay_')) return bad('razorpay_payment_id must start with pay_');
+    if (stored !== undefined && !stored.startsWith('order_') && !stored.startsWith('sub_')) {
+      return bad('providerOrderId must be the order_... or sub_... id returned by createPayment/createSubscription.');
+    }
+    if (stored === undefined && !input.orderRef) {
+      return bad('Cannot bind this callback to an order: pass providerOrderId (the order_/sub_ id you stored when creating it) or orderRef.');
+    }
 
     // Subscription authorisation callback: razorpay_subscription_id instead of an order id.
-    if (p.razorpay_subscription_id !== undefined) {
-      const subId = p.razorpay_subscription_id;
-      if (!subId.startsWith('sub_') || p.razorpay_order_id !== undefined) return bad('Malformed subscription callback.');
-      if (!paymentId || !signature) return bad('Payload must contain razorpay_payment_id, razorpay_subscription_id and razorpay_signature.');
+    if (p.razorpay_subscription_id !== undefined || stored?.startsWith('sub_')) {
+      const payloadSubId = p.razorpay_subscription_id;
+      if ((payloadSubId !== undefined && !payloadSubId.startsWith('sub_')) || p.razorpay_order_id !== undefined) return bad('Malformed subscription callback.');
+      if (stored !== undefined && !stored.startsWith('sub_')) return bad('providerOrderId is an order id but the callback is for a subscription.');
+      if (stored !== undefined && payloadSubId !== undefined && payloadSubId !== stored) {
+        return bad(`Callback is for subscription ${payloadSubId}, not the stored ${stored}.`);
+      }
+      const subId = stored ?? payloadSubId!;
+      if (!paymentId || !signature) return bad('Payload must contain razorpay_payment_id and razorpay_signature (and razorpay_subscription_id unless providerOrderId is given).');
       if (!safeEqual(razorpaySubscriptionSignature(paymentId, subId, this.creds.keySecret), signature)) return bad('Signature mismatch');
       // Bind to the caller's subscription and amount using Razorpay's own records.
       const [{ data: sub }, { data: payment }] = await Promise.all([
@@ -220,21 +239,17 @@ class RazorpayGateway implements PaymentGateway {
       };
     }
 
-    const orderId = p.razorpay_order_id;
-    if (orderId !== undefined && !orderId.startsWith('order_')) return bad('razorpay_order_id must start with order_');
+    const payloadOrderId = p.razorpay_order_id;
+    if (payloadOrderId !== undefined && !payloadOrderId.startsWith('order_')) return bad('razorpay_order_id must start with order_');
+    if (stored !== undefined && payloadOrderId !== undefined && payloadOrderId !== stored) {
+      return bad(`Callback is for order ${payloadOrderId}, not the stored ${stored}.`);
+    }
+    const orderId = stored ?? payloadOrderId;
     if (!paymentId || !orderId || !signature) {
-      return {
-        valid: false,
-        status: 'unknown',
-        verifiedVia: 'signature',
-        reason: 'Payload must contain razorpay_payment_id, razorpay_order_id and razorpay_signature.',
-        raw: p,
-      };
+      return bad('Payload must contain razorpay_payment_id, razorpay_order_id and razorpay_signature.');
     }
     const expected = razorpayPaymentSignature(orderId, paymentId, this.creds.keySecret);
-    if (!safeEqual(expected, signature)) {
-      return { valid: false, status: 'unknown', verifiedVia: 'signature', reason: 'Signature mismatch', raw: p };
-    }
+    if (!safeEqual(expected, signature)) return bad('Signature mismatch');
 
     // The signature proves the payment belongs to the order. To bind it to the caller's orderRef
     // and amount we must look the order up (the browser payload carries neither).
@@ -363,11 +378,17 @@ class RazorpayGateway implements PaymentGateway {
         order?: { entity: RzpOrder };
         refund?: { entity: RzpRefund };
         subscription?: { entity: { id: string; notes?: Record<string, string> } };
+        dispute?: { entity: { id: string; amount: number; currency: string; payment_id?: string } };
+        settlement?: { entity: { id: string; amount: number; utr?: string; status?: string } };
       };
     };
     const payment = body.payload.payment?.entity;
     const order = body.payload.order?.entity;
     const refund = body.payload.refund?.entity;
+    const sub = body.payload.subscription?.entity;
+    const dispute = body.payload.dispute?.entity;
+    const settlement = body.payload.settlement?.entity;
+    const isSubEvent = body.event.startsWith('subscription.');
     const eventId = getHeader(input.headers, 'x-razorpay-event-id');
 
     const typeMap: Record<string, WebhookEventType> = {
@@ -387,22 +408,24 @@ class RazorpayGateway implements PaymentGateway {
     const type = typeMap[body.event] ?? 'unknown';
     // orderRef comes only from the order (created server-side). payment.notes can be set by whoever
     // opens Checkout, so it is not trusted. Subscribe to `order.paid` to get the order entity; for
-    // `payment.*` events map providerOrderId -> your order yourself.
+    // `payment.*` events map providerOrderId -> your order yourself. Subscription notes are set by
+    // createSubscription server-side, so subscription_ref is trusted the same way.
+    // settlement.processed: the settlement UTR is in raw.payload.settlement.entity.utr.
     const refundNotes = refund && !Array.isArray(refund.notes) ? refund.notes : {};
 
     return {
       provider: 'razorpay',
-      id: eventId ?? `${body.event}:${refund?.id ?? payment?.id ?? order?.id ?? body.created_at}`,
+      id: eventId ?? `${body.event}:${refund?.id ?? dispute?.id ?? settlement?.id ?? payment?.id ?? order?.id ?? sub?.id ?? body.created_at}`,
       type,
       providerEventType: body.event,
-      orderRef: order?.receipt ?? undefined,
-      providerOrderId: payment?.order_id ?? order?.id,
+      orderRef: (isSubEvent ? sub?.notes?.subscription_ref : undefined) ?? order?.receipt ?? undefined,
+      providerOrderId: (isSubEvent ? sub?.id : undefined) ?? payment?.order_id ?? order?.id ?? undefined,
       providerPaymentId: payment?.id ?? refund?.payment_id,
       providerRefundId: refund?.id,
       refundRef: refundNotes.refund_ref ?? refund?.receipt ?? undefined,
       status: payment ? mapRazorpayPaymentStatus(payment) : undefined,
-      amount: refund?.amount ?? payment?.amount ?? order?.amount,
-      currency: payment?.currency ?? order?.currency,
+      amount: dispute?.amount ?? settlement?.amount ?? refund?.amount ?? payment?.amount ?? order?.amount,
+      currency: dispute?.currency ?? payment?.currency ?? order?.currency ?? (settlement ? 'INR' : undefined),
       occurredAt: body.created_at ? new Date(body.created_at * 1000).toISOString() : undefined,
       raw: body,
     };
@@ -479,9 +502,16 @@ class RazorpayGateway implements PaymentGateway {
         throw new PaymentError('VALIDATION', 'Pass providerPlanId or plan to create a Razorpay subscription.', { provider: 'razorpay' });
       }
       const period = { day: 'daily', week: 'weekly', month: 'monthly', year: 'yearly' }[input.plan.interval];
+      const interval = input.plan.intervalCount ?? 1;
+      if (period === 'daily' && interval < 7) {
+        throw new PaymentError('VALIDATION', 'Razorpay daily plans need intervalCount >= 7.', {
+          provider: 'razorpay',
+          hint: 'Razorpay rejects daily plans with interval below 7; use interval "week" for weekly billing.',
+        });
+      }
       const { data: plan } = await this.call<{ id: string }>('POST', '/plans', 'create_plan', {
         period,
-        interval: input.plan.intervalCount ?? 1,
+        interval,
         item: { name: input.plan.name, amount: input.plan.amount, currency: input.plan.currency ?? 'INR' },
       });
       planId = plan.id;
@@ -495,9 +525,14 @@ class RazorpayGateway implements PaymentGateway {
     const { data } = await this.call<{ id: string; status: string; short_url?: string }>('POST', '/subscriptions', 'create_subscription', {
       plan_id: planId,
       total_count: input.totalCount,
-      customer_notify: 1,
-      notes: { subscription_ref: input.subscriptionRef, ...(input.metadata ?? {}) },
-      ...(input.providerCustomerId ? { customer_id: input.providerCustomerId } : {}),
+      customer_notify: true,
+      // customer_id is not a create-subscription parameter (Razorpay fills it in after authorisation);
+      // keep the caller's customer id in notes so it can be correlated later.
+      notes: {
+        subscription_ref: input.subscriptionRef,
+        ...(input.providerCustomerId ? { customer_id: input.providerCustomerId } : {}),
+        ...(input.metadata ?? {}),
+      },
       ...(input.providerOptions ?? {}),
     });
     return {
@@ -511,6 +546,7 @@ class RazorpayGateway implements PaymentGateway {
         scriptUrl: CHECKOUT_JS,
         options: {
           key: this.creds.keyId,
+          name: this.creds.merchantName ?? DEFAULT_MERCHANT_NAME,
           subscription_id: data.id,
           prefill: { name: input.customer?.name, email: input.customer?.email, contact: input.customer?.phone },
           ...(input.returnUrl ? { callback_url: input.returnUrl, redirect: true } : {}),
@@ -525,7 +561,7 @@ class RazorpayGateway implements PaymentGateway {
       'POST',
       `/subscriptions/${encodeURIComponent(input.providerSubscriptionId)}/cancel`,
       'cancel_subscription',
-      { cancel_at_cycle_end: input.atCycleEnd ? 1 : 0 },
+      { cancel_at_cycle_end: input.atCycleEnd === true },
       true,
     );
     return {

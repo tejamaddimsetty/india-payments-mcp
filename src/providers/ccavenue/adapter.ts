@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import type { AdapterContext, PaymentGateway, ProviderModule } from '../../core/gateway.js';
 import { PaymentError, unsupported } from '../../core/errors.js';
 import { getHeader, md5 } from '../../core/crypto.js';
@@ -26,25 +26,41 @@ export interface CcavenueCredentials {
   merchantId?: string;
   accessCode?: string;
   workingKey?: string;
+  /** CCAVENUE_ENCRYPTION: 'cbc' (classic AES-128 kit, default) or 'gcm' (AES-256 kit). */
+  encryption?: string;
 }
 
-/** Checkout and API hosts differ, and both differ between test and live. All UNVERIFIED (kit knowledge). */
+export type CcavenueEncryption = 'cbc' | 'gcm';
+
+/**
+ * Checkout and API hosts differ, and both differ between test and live.
+ * Sources (docs/research/verification/round1-ccavenue.md): live checkout URLs come from mirrors of
+ * CCAvenue's own integration kits (AES-128 and AES-256 folders of the NodeJS kit); the test checkout
+ * URLs and the API hosts come from third-party integrations. The GCM *test* checkout URL is
+ * third-party-sourced only (Think-To-Share CcAvenueGateway.php).
+ */
 export const CCAVENUE_URLS = {
   sandbox: {
     checkout: 'https://test.ccavenue.com/transaction/transaction.do?command=initiateTransaction',
+    // Third-party-sourced (not in any official kit).
+    checkoutGcm: 'https://test.ccavenue.com/gTransaction.do?command=initiateTransaction',
     api: 'https://apitest.ccavenue.com/apis/servlet/DoWebTrans',
   },
   live: {
     checkout: 'https://secure.ccavenue.com/transaction/transaction.do?command=initiateTransaction',
+    // NodeJS kit AES-256/ccavRequestHandler.js (official kit, mirror).
+    checkoutGcm: 'https://secure.ccavenue.com/gTransaction.do?command=initiateTransaction',
     api: 'https://api.ccavenue.com/apis/servlet/DoWebTrans',
   },
 } as const;
 
 /**
- * DoWebTrans `version`. The old API PDF says 1.1; newer commands use 1.2. Whether
- * orderStatusTracker/refundOrder accept 1.2 is UNVERIFIED: switch to '1.1' if CCAvenue rejects it.
+ * DoWebTrans `version` per command (round1-ccavenue.md items 29-31). The API PDF copy says "current
+ * possible values is 1.1". Every refundOrder implementation found sends 1.1; orderStatusTracker is
+ * sent as 1.2 by the Go client and ERPNext (Perfex uses 1.1), so both work in the wild.
+ * Unlisted commands default to 1.1.
  */
-const API_VERSION = '1.2';
+const API_VERSION: Readonly<Record<string, string>> = { orderStatusTracker: '1.2', refundOrder: '1.1' };
 
 const MERCHANT_PARAMS = ['merchant_param1', 'merchant_param2', 'merchant_param3', 'merchant_param4', 'merchant_param5'] as const;
 
@@ -61,6 +77,65 @@ export function ccavenueDecrypt(encHex: string, workingKey: string): string {
   if (!/^(?:[0-9a-fA-F]{32})+$/.test(encHex.trim())) throw new Error('ciphertext is not hex in whole AES blocks');
   const decipher = createDecipheriv('aes-128-cbc', md5(workingKey), IV);
   return Buffer.concat([decipher.update(Buffer.from(encHex.trim(), 'hex')), decipher.final()]).toString('utf8');
+}
+
+// AES-256 kit scheme (NodeJS kit AES-256/ccavutil.js, official kit mirror): aes-256-gcm, key = the
+// working key used directly as 32 UTF-8 bytes (no MD5), random 12-byte IV,
+// output = hex(iv) + hex(ciphertext || 16-byte auth tag).
+const GCM_TAG_BYTES = 16;
+
+/** The working key as the 32-byte AES-256 key; CONFIG_INVALID if it is not exactly 32 bytes. */
+export function ccavenueGcmKey(workingKey: string): Buffer {
+  const key = Buffer.from(workingKey, 'utf8');
+  if (key.length !== 32) {
+    throw new PaymentError('CONFIG_INVALID', `CCAVENUE_ENCRYPTION=gcm needs a 32-character working key (got ${key.length} bytes).`, {
+      provider: 'ccavenue',
+      hint: 'The AES-256 kit uses CCAVENUE_WORKING_KEY directly as the key. Check the key, or set CCAVENUE_ENCRYPTION=cbc for the classic AES-128 kit.',
+    });
+  }
+  return key;
+}
+
+/** `iv` is for tests only; production calls always use a fresh random 12-byte IV. */
+export function ccavenueEncryptGcm(plainText: string, workingKey: string, iv: Buffer = randomBytes(12)): string {
+  const cipher = createCipheriv('aes-256-gcm', ccavenueGcmKey(workingKey), iv);
+  const ct = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
+  return iv.toString('hex') + Buffer.concat([ct, cipher.getAuthTag()]).toString('hex');
+}
+
+/**
+ * Throws on a wrong key or any tampering (GCM authentication failure). The official kit uses a 12-byte
+ * IV; several third-party GCM integrations use 16, and the length cannot be read from the data, so a
+ * 12-byte IV is tried first and 16 second. Only one can authenticate.
+ */
+export function ccavenueDecryptGcm(encHex: string, workingKey: string): string {
+  const hex = encHex.trim();
+  if (!/^(?:[0-9a-fA-F]{2})+$/.test(hex)) throw new Error('ciphertext is not hex');
+  const key = ccavenueGcmKey(workingKey);
+  const buf = Buffer.from(hex, 'hex');
+  let lastError: unknown = new Error('ciphertext too short for AES-GCM');
+  for (const ivLen of [12, 16]) {
+    if (buf.length < ivLen + GCM_TAG_BYTES) continue;
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', key, buf.subarray(0, ivLen));
+      decipher.setAuthTag(buf.subarray(buf.length - GCM_TAG_BYTES));
+      return Buffer.concat([decipher.update(buf.subarray(ivLen, buf.length - GCM_TAG_BYTES)), decipher.final()]).toString('utf8');
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError;
+}
+
+/** The kit sample sends billing_country as a country NAME ("India"); map ISO 3166 alpha-2 codes to names. */
+function countryName(country: string): string {
+  const c = country.trim();
+  if (!/^[A-Za-z]{2}$/.test(c)) return c;
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'region' }).of(c.toUpperCase()) ?? c;
+  } catch {
+    return c;
+  }
 }
 
 /** Redirect/notification `order_status` values plus the richer orderStatusTracker ones. */
@@ -149,12 +224,21 @@ class CcavenueGateway implements PaymentGateway {
   private readonly urls: (typeof CCAVENUE_URLS)[keyof typeof CCAVENUE_URLS];
 
   constructor(
-    private readonly creds: Required<CcavenueCredentials>,
+    private readonly creds: Required<Omit<CcavenueCredentials, 'encryption'>> & { encryption: CcavenueEncryption },
     private readonly ctx: AdapterContext,
   ) {
     this.environment = ctx.environment;
     this.http = ctx.http;
     this.urls = CCAVENUE_URLS[ctx.environment];
+  }
+
+  /** Same scheme for checkout, redirect/notification and (UNVERIFIED for gcm) DoWebTrans. */
+  private encrypt(plain: string): string {
+    return this.creds.encryption === 'gcm' ? ccavenueEncryptGcm(plain, this.creds.workingKey) : ccavenueEncrypt(plain, this.creds.workingKey);
+  }
+
+  private decrypt(encHex: string): string {
+    return this.creds.encryption === 'gcm' ? ccavenueDecryptGcm(encHex, this.creds.workingKey) : ccavenueDecrypt(encHex, this.creds.workingKey);
   }
 
   capabilities() {
@@ -164,7 +248,7 @@ class CcavenueGateway implements PaymentGateway {
   private decryptFields(encResp: string | undefined): Record<string, string> | undefined {
     if (!encResp) return undefined;
     try {
-      return Object.fromEntries(new URLSearchParams(ccavenueDecrypt(encResp, this.creds.workingKey)));
+      return Object.fromEntries(new URLSearchParams(this.decrypt(encResp)));
     } catch {
       return undefined;
     }
@@ -176,12 +260,12 @@ class CcavenueGateway implements PaymentGateway {
    */
   private async api<T>(command: string, request: Record<string, unknown>, operation: string, retrySafe = false): Promise<T> {
     const body = new URLSearchParams({
-      enc_request: ccavenueEncrypt(JSON.stringify(request), this.creds.workingKey),
+      enc_request: this.encrypt(JSON.stringify(request)),
       access_code: this.creds.accessCode,
       command,
       request_type: 'JSON',
       response_type: 'JSON',
-      version: API_VERSION,
+      version: API_VERSION[command] ?? '1.1',
     });
     const { data } = await this.http.request<unknown>({ method: 'POST', url: this.urls.api, body, operation, retrySafe });
     const outer: Record<string, string> =
@@ -199,7 +283,7 @@ class CcavenueGateway implements PaymentGateway {
     }
     let plain: string;
     try {
-      plain = ccavenueDecrypt(outer.enc_response, this.creds.workingKey);
+      plain = this.decrypt(outer.enc_response);
     } catch (cause) {
       throw new PaymentError('PROVIDER_ERROR', `CCAvenue ${command}: could not decrypt enc_response with the working key.`, { provider: 'ccavenue', cause, raw: outer });
     }
@@ -244,7 +328,7 @@ class CcavenueGateway implements PaymentGateway {
       if (a.city) order.billing_city = a.city;
       if (a.state) order.billing_state = a.state;
       if (a.postalCode) order.billing_zip = a.postalCode;
-      if (a.country) order.billing_country = a.country;
+      if (a.country) order.billing_country = countryName(a.country);
     }
     MERCHANT_PARAMS.forEach((k, i) => {
       if (meta[i] !== undefined) order[k] = meta[i] as string;
@@ -253,7 +337,7 @@ class CcavenueGateway implements PaymentGateway {
       if (v !== undefined && v !== null) order[k] = String(v);
     }
 
-    const encRequest = ccavenueEncrypt(new URLSearchParams(order).toString(), this.creds.workingKey);
+    const encRequest = this.encrypt(new URLSearchParams(order).toString());
     return {
       provider: 'ccavenue',
       environment: this.environment,
@@ -263,7 +347,7 @@ class CcavenueGateway implements PaymentGateway {
       status: 'created',
       amount: input.amount,
       currency,
-      checkout: { type: 'form_post', url: this.urls.checkout, fields: { encRequest, access_code: this.creds.accessCode } },
+      checkout: { type: 'form_post', url: this.creds.encryption === 'gcm' ? this.urls.checkoutGcm : this.urls.checkout, fields: { encRequest, access_code: this.creds.accessCode } },
       // Plaintext order (no secrets in it) so callers can see what was encrypted.
       raw: order,
     };
@@ -382,8 +466,9 @@ class CcavenueGateway implements PaymentGateway {
   }
 
   async parseWebhook(input: WebhookInput): Promise<NormalizedWebhookEvent> {
-    // No documented signature: the body is the same encResp POST as the redirect, and only the
-    // holder of the working key could have produced a ciphertext that decrypts to a valid order.
+    // No documented signature: the body is the same encResp POST as the redirect. With cbc, decryption
+    // is not authentication (no MAC); with gcm the auth tag does authenticate it. Either way the
+    // result is reported as verifiedVia 'decryption' and the client re-confirms via the status API.
     const body = parseBody(input.rawBody);
     const f = this.decryptFields(body.encResp ?? body.enc_response);
     if (!f || !f.order_id) {
@@ -421,7 +506,11 @@ class CcavenueGateway implements PaymentGateway {
 
   async simulateWebhook(input: SimulateWebhookInput): Promise<SimulatedWebhook> {
     if (input.type === 'refund.processed') {
-      throw unsupported('ccavenue', 'refund notifications', 'The encrypted response channel only carries payment results; poll getPaymentStatus for refunds.');
+      throw unsupported(
+        'ccavenue',
+        'refund notifications',
+        'CCAvenue offers an "Order Refund Status" Dynamic Event Notification, but its payload is not publicly documented and this adapter does not parse it; poll getPaymentStatus for refunds.',
+      );
     }
     const ok = input.type === 'payment.succeeded';
     const currency = input.currency ?? 'INR';
@@ -446,7 +535,7 @@ class CcavenueGateway implements PaymentGateway {
       trans_date: transDate,
     });
     const rawBody = new URLSearchParams({
-      encResp: ccavenueEncrypt(fields.toString(), this.creds.workingKey),
+      encResp: this.encrypt(fields.toString()),
       orderNo: input.orderRef,
     }).toString();
     return {
@@ -476,7 +565,15 @@ export const ccavenue: ProviderModule<CcavenueCredentials> = {
         hint: 'Dashboard > Settings > API Keys. Test and live credentials differ; they are tied to the registered domain.',
       });
     }
-    return new CcavenueGateway({ merchantId: creds.merchantId, accessCode: creds.accessCode, workingKey: creds.workingKey }, ctx);
+    const encryption = (creds.encryption ?? 'cbc').trim().toLowerCase() || 'cbc';
+    if (encryption !== 'cbc' && encryption !== 'gcm') {
+      throw new PaymentError('CONFIG_INVALID', `CCAVENUE_ENCRYPTION must be cbc or gcm (got "${creds.encryption}").`, {
+        provider: 'ccavenue',
+        hint: 'cbc = classic AES-128 integration kit (default); gcm = AES-256 kit. Ask CCAvenue which kit your account uses.',
+      });
+    }
+    if (encryption === 'gcm') ccavenueGcmKey(creds.workingKey);
+    return new CcavenueGateway({ merchantId: creds.merchantId, accessCode: creds.accessCode, workingKey: creds.workingKey, encryption }, ctx);
   },
   extractError(data) {
     if (typeof data === 'string') {

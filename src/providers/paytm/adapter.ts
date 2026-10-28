@@ -1,6 +1,6 @@
 import type { AdapterContext, PaymentGateway, ProviderModule } from '../../core/gateway.js';
-import { PaymentError } from '../../core/errors.js';
-import type { HttpClient } from '../../core/http.js';
+import { PaymentError, type PaymentErrorCode } from '../../core/errors.js';
+import type { HttpClient, HttpResponse } from '../../core/http.js';
 import { assertMinorUnits, fromMajor, toMajorString } from '../../core/money.js';
 import type {
   CreatePaymentInput,
@@ -21,7 +21,7 @@ import type {
   WebhookInput,
 } from '../../core/types.js';
 import { paytmCapabilities } from './capabilities.js';
-import { generateSignature, verifySignature } from './checksum.js';
+import { extractRawJsonMember, generateSignature, verifySignature } from './checksum.js';
 
 export interface PaytmCredentials {
   mid?: string;
@@ -31,12 +31,37 @@ export interface PaytmCredentials {
 
 /**
  * Paytm rebranded its hosts to paytmpayments.com. The legacy hosts (securegw-stage.paytm.in /
- * securegw.paytm.in) only appear in old docs. Refund and status doc pages show staging
- * securegw-stage.paytmpayments.in; we use one host per environment for every call until a sandbox
- * run proves otherwise.
+ * securegw.paytm.in) only appear in old docs. Initiate Transaction, JS Checkout, showPaymentPage and
+ * /v3/order/status use these hosts (T-INIT, T-JSINV, T-JSVER; an unauthenticated probe showed
+ * /v3/order/status answers on securestage.paytmpayments.com but returns 503 "no healthy upstream" on
+ * securegw-stage.paytmpayments.in, so status stays here).
  */
 export const PAYTM_STAGING_HOST = 'https://securestage.paytmpayments.com';
 export const PAYTM_LIVE_HOST = 'https://secure.paytmpayments.com';
+
+/**
+ * Refund Apply (/refund/apply) and Refund Status (/v2/refund/status) are documented ONLY on the
+ * securegw hosts: paytmpayments.com/docs/api/refund-api and /docs/api/refund-status-api list
+ * https://securegw-stage.paytmpayments.in (staging) and https://securegw.paytmpayments.in (production).
+ * The staging probe showed both staging hosts route these paths; we follow the docs. Confirm in a
+ * sandbox run (verification round 1, M10).
+ */
+export const PAYTM_REFUND_STAGING_HOST = 'https://securegw-stage.paytmpayments.in';
+export const PAYTM_REFUND_LIVE_HOST = 'https://securegw.paytmpayments.in';
+
+/** custId: "Special characters allowed in CustId are @, ! ,=,_ ,$, ." (Initiate Transaction API). */
+export function sanitizePaytmCustId(id: string): string {
+  return id.replace(/[^A-Za-z0-9@!=_$.]/g, '_');
+}
+
+/** Refund Apply codes meaning "this refId was already used": the first attempt registered the refund. */
+const DUPLICATE_REFUND_CODES = new Set(['617', '671', '626', '629']);
+/** v3 order status lookup errors (not a payment outcome): 334 invalid order id, 335 invalid MID, 330 checksum. */
+const STATUS_LOOKUP_ERROR_CODES = new Set(['330', '334', '335']);
+/** v2 refund status lookup errors: 631 record not found, 335 invalid MID, 600 invalid refund request, 330 checksum. */
+const REFUND_STATUS_LOOKUP_ERROR_CODES = new Set(['330', '335', '600', '631']);
+const MAX_REFUND_REF = 50;
+const MAX_REFUND_COMMENTS = 500;
 
 /** txnToken lifetime per the Initiate Transaction docs. */
 const TXN_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -101,6 +126,44 @@ export function mapPaytmTxnStatus(status: string | undefined, txnAmount?: number
   }
 }
 
+/** Status API paymentMode: CC, DC, NB, UPI, PPI (wallet), PAYTMCC (postpaid), EMI... */
+export function mapPaytmPaymentMode(mode: string | undefined): string | undefined {
+  if (!mode) return undefined;
+  const m = mode.toUpperCase();
+  if (m === 'CC' || m === 'DC') return 'card';
+  if (m === 'NB') return 'netbanking';
+  if (m === 'UPI') return 'upi';
+  if (m === 'PPI') return 'wallet';
+  if (m === 'PAYTMCC') return 'paylater';
+  if (m === 'EMI') return 'emi';
+  return mode.toLowerCase();
+}
+
+/** Paytm timestamps ("yyyy-MM-dd HH:mm:ss.S") are IST wall-clock without an offset. */
+function paytmTimeToIso(s: string | undefined): string | undefined {
+  if (!s) return undefined;
+  const t = Date.parse(s.trim().replace(' ', 'T') + '+05:30');
+  return Number.isFinite(t) ? new Date(t).toISOString() : undefined;
+}
+
+interface PaytmRefundWebhookBody {
+  mid?: string;
+  orderId?: string;
+  txnId?: string;
+  txnAmount?: string;
+  refId?: string;
+  refundId?: string;
+  refundAmount?: string;
+  totalRefundAmount?: string;
+  status?: string;
+  txnTimestamp?: string;
+  merchantRefundRequestTimestamp?: string;
+  acceptRefundTimestamp?: string;
+  userCreditInitiateTimestamp?: string;
+  rejectRefundReasonCode?: string;
+  rejectRefundReasonMessage?: string;
+}
+
 function mapRefundStatus(s: string | undefined): RefundStatus {
   if (s === 'TXN_SUCCESS') return 'processed';
   if (s === 'PENDING') return 'pending';
@@ -119,7 +182,7 @@ function parseNotificationBody(rawBody: string): Record<string, string> {
       else if (typeof v === 'object') {
         throw new PaymentError('VALIDATION', `Paytm notification field ${k} is nested; expected flat key-value pairs.`, {
           provider: 'paytm',
-          hint: 'Only the flat payment notification (ORDERID, TXNID, STATUS, CHECKSUMHASH, ...) is supported.',
+          hint: 'Flat payment notifications (ORDERID, TXNID, STATUS, CHECKSUMHASH, ...) and {head, body} refund notifications are supported.',
         });
       } else out[k] = String(v);
     }
@@ -133,6 +196,7 @@ class PaytmGateway implements PaymentGateway {
   readonly environment;
   private readonly http: HttpClient;
   private readonly host: string;
+  private readonly refundHost: string;
   private readonly website: string;
 
   constructor(
@@ -142,6 +206,7 @@ class PaytmGateway implements PaymentGateway {
     this.environment = ctx.environment;
     this.http = ctx.http;
     this.host = ctx.environment === 'live' ? PAYTM_LIVE_HOST : PAYTM_STAGING_HOST;
+    this.refundHost = ctx.environment === 'live' ? PAYTM_REFUND_LIVE_HOST : PAYTM_REFUND_STAGING_HOST;
     this.website = creds.website || (ctx.environment === 'live' ? 'DEFAULT' : 'WEBSTAGING');
   }
 
@@ -154,23 +219,44 @@ class PaytmGateway implements PaymentGateway {
    * JSON.stringify(body). We serialise once and splice that exact string into the request so the
    * signed bytes and the sent bytes cannot drift.
    */
-  private signedPost<B>(path: string, body: Record<string, unknown>, operation: string, retrySafe: boolean) {
+  private async signedPost<B>(path: string, body: Record<string, unknown>, operation: string, retrySafe: boolean, host = this.host) {
     const bodyJson = JSON.stringify(body);
     const signature = generateSignature(bodyJson, this.creds.merchantKey);
-    return this.http.request<PaytmEnvelope<B>>({
+    const res = await this.http.request<PaytmEnvelope<B>>({
       method: 'POST',
-      url: `${this.host}${path}`,
+      url: `${host}${path}`,
       headers: { 'Content-Type': 'application/json' },
       body: `{"body":${bodyJson},"head":${JSON.stringify({ signature })}}`,
       operation,
       retrySafe,
     });
+    this.verifyResponseSignature(operation, res);
+    return res;
   }
 
-  private resultError(operation: string, info: PaytmResultInfo | undefined, raw: unknown): PaymentError {
-    // 330 = "Paytm checksum is invalid" in Paytm's response-code list (UNVERIFIED against current docs).
-    const auth = info?.resultCode === '330';
-    return new PaymentError(auth ? 'AUTH' : 'PROVIDER_ERROR', `paytm ${operation} failed: ${info?.resultMsg ?? 'unknown error'}`, {
+  /**
+   * Paytm signs JSON responses with head.signature over the exact `body` bytes ("You should validate
+   * the parameter values by verifying the signature": status and refund API docs). We verify against
+   * the raw `"body":{...}` substring of HttpResponse.text. Some error responses carry no signature,
+   * so a missing one is tolerated (TLS only); a present but wrong one is rejected.
+   */
+  private verifyResponseSignature(operation: string, res: HttpResponse<PaytmEnvelope<unknown>>): void {
+    const signature = typeof res.data === 'object' && res.data ? res.data.head?.signature : undefined;
+    if (!signature) return;
+    const rawBody = extractRawJsonMember(res.text, 'body');
+    if (!rawBody || !verifySignature(rawBody, this.creds.merchantKey, signature)) {
+      throw new PaymentError('SIGNATURE_INVALID', `paytm ${operation}: response head.signature does not match the body.`, {
+        provider: 'paytm',
+        raw: res.data,
+        hint: 'The response may have been altered in transit, or PAYTM_MERCHANT_KEY does not belong to PAYTM_MID.',
+      });
+    }
+  }
+
+  private resultError(operation: string, info: PaytmResultInfo | undefined, raw: unknown, code?: PaymentErrorCode): PaymentError {
+    // Checksum invalid: 330 on the status/refund APIs, 2005 on Initiate Transaction (T-INIT code table).
+    const auth = info?.resultCode === '330' || info?.resultCode === '2005';
+    return new PaymentError(code ?? (auth ? 'AUTH' : 'PROVIDER_ERROR'), `paytm ${operation} failed: ${info?.resultMsg ?? 'unknown error'}`, {
       provider: 'paytm',
       providerCode: info?.resultCode,
       providerMessage: info?.resultMsg,
@@ -204,7 +290,8 @@ class PaytmGateway implements PaymentGateway {
       callbackUrl: input.returnUrl,
       txnAmount: { value: amount, currency },
       // custId is mandatory; derive a stable one so a retried order maps to the same customer.
-      userInfo: { custId: c?.id ?? `CUST_${input.orderRef}`, mobile: c?.phone, email: c?.email, firstName: c?.name },
+      // Sanitised to the documented custId charset (a '-' in orderRef or customer.id would be rejected).
+      userInfo: { custId: sanitizePaytmCustId(c?.id ?? `CUST_${input.orderRef}`), mobile: c?.phone, email: c?.email, firstName: c?.name },
       ...(input.providerOptions ?? {}),
     };
     // Re-initiating the same orderId is not documented as idempotent, so never auto-retry.
@@ -285,9 +372,12 @@ class PaytmGateway implements PaymentGateway {
     const { data } = await this.signedPost<PaytmStatusBody>('/v3/order/status', { mid: this.creds.mid, orderId }, 'order_status', true);
     const b = data?.body;
     if (!b?.resultInfo) throw this.resultError('order_status', undefined, data);
-    if (b.resultInfo.resultCode === '330') throw this.resultError('order_status', b.resultInfo, data);
-    // The response carries head.signature over the body; we rely on TLS and do not re-verify it
-    // because the shared HTTP client hands us parsed JSON, not the exact signed body bytes.
+    const code = b.resultInfo.resultCode ?? '';
+    // 501 "Server Down" comes back as TXN_FAILURE but says nothing about the payment: retryable.
+    if (code === '501') throw this.resultError('order_status', b.resultInfo, data, 'PROVIDER_UNAVAILABLE');
+    // Bad order id / MID / checksum are lookup errors, not a failed payment.
+    if (STATUS_LOOKUP_ERROR_CODES.has(code)) throw this.resultError('order_status', b.resultInfo, data);
+    // head.signature was verified against the raw body in signedPost.
     const amount = b.txnAmount ? fromMajor(b.txnAmount) : undefined;
     const refunded = b.refundAmt ? fromMajor(b.refundAmt) : undefined;
     const status = mapPaytmTxnStatus(b.resultInfo.resultStatus, amount, refunded);
@@ -300,7 +390,7 @@ class PaytmGateway implements PaymentGateway {
       amount,
       amountRefunded: refunded,
       currency: 'INR',
-      method: b.paymentMode ? b.paymentMode.toLowerCase() : undefined,
+      method: mapPaytmPaymentMode(b.paymentMode),
       failureReason: status === 'failed' ? b.resultInfo.resultMsg : undefined,
       raw: data,
     };
@@ -312,6 +402,14 @@ class PaytmGateway implements PaymentGateway {
         provider: 'paytm',
         hint: 'Get it from getPaymentStatus(...).providerPaymentId or the TXNID field of the callback/webhook.',
       });
+    }
+    if (!input.refundRef || input.refundRef.length > MAX_REFUND_REF) {
+      throw new PaymentError('VALIDATION', `Paytm refundRef (refId) must be 1-${MAX_REFUND_REF} characters; got ${input.refundRef?.length ?? 0}.`, {
+        provider: 'paytm',
+      });
+    }
+    if (input.reason && input.reason.length > MAX_REFUND_COMMENTS) {
+      throw new PaymentError('VALIDATION', `Paytm refund comments (reason) must be at most ${MAX_REFUND_COMMENTS} characters.`, { provider: 'paytm' });
     }
     let amount = input.amount;
     if (amount === undefined) {
@@ -334,8 +432,15 @@ class PaytmGateway implements PaymentGateway {
       ...(input.reason ? { comments: input.reason } : {}),
     };
     // refId is unique per merchant, so Paytm rejects a duplicate instead of refunding twice: retry-safe.
-    const { data } = await this.signedPost<PaytmRefundBody>('/refund/apply', body, 'create_refund', true);
+    // A retry after a lost response gets a duplicate-refId code; that is handled below.
+    const { data } = await this.signedPost<PaytmRefundBody>('/refund/apply', body, 'create_refund', true, this.refundHost);
     const b = data?.body;
+    if (b?.resultInfo?.resultCode && DUPLICATE_REFUND_CODES.has(b.resultInfo.resultCode)) {
+      // 617 "Refund Already Raised", 671 "Refund retry is not supported with same refund id", 626/629:
+      // a refund with this refId already exists (typically our own earlier attempt), so report its
+      // current state instead of "refund failed". Compare `amount` if refIds may be reused.
+      return this.getRefundStatus({ orderRef: input.orderRef, refundRef: input.refundRef });
+    }
     if (!b?.resultInfo || b.resultInfo.resultStatus === 'TXN_FAILURE') throw this.resultError('create_refund', b?.resultInfo, data);
     return {
       provider: 'paytm',
@@ -356,21 +461,38 @@ class PaytmGateway implements PaymentGateway {
       { mid: this.creds.mid, orderId: input.orderRef, refId: input.refundRef },
       'refund_status',
       true,
+      this.refundHost,
     );
     const b = data?.body;
     if (!b?.resultInfo) throw this.resultError('refund_status', undefined, data);
-    if (b.resultInfo.resultCode === '330') throw this.resultError('refund_status', b.resultInfo, data);
+    const code = b.resultInfo.resultCode ?? '';
+    // Lookup errors (record not found, bad MID, invalid request, checksum) are not a failed refund.
+    if (REFUND_STATUS_LOOKUP_ERROR_CODES.has(code)) {
+      throw this.resultError('refund_status', b.resultInfo, data, code === '631' ? 'NOT_FOUND' : undefined);
+    }
     return {
       provider: 'paytm',
       refundRef: b.refId ?? input.refundRef,
       providerRefundId: b.refundId || input.providerRefundId,
-      status: mapRefundStatus(b.resultInfo.resultStatus),
+      // 501 "System Error" is listed as PENDING: the outcome is not known yet.
+      status: code === '501' ? 'pending' : mapRefundStatus(b.resultInfo.resultStatus),
       amount: b.refundAmount ? fromMajor(b.refundAmount) : undefined,
       raw: data,
     };
   }
 
   async parseWebhook(input: WebhookInput): Promise<NormalizedWebhookEvent> {
+    const trimmed = input.rawBody.trim();
+    if (trimmed.startsWith('{')) {
+      let obj: unknown;
+      try {
+        obj = JSON.parse(trimmed);
+      } catch (err) {
+        throw new PaymentError('VALIDATION', 'Paytm notification body is neither form-encoded nor valid JSON.', { provider: 'paytm', cause: err });
+      }
+      const body = (obj as { body?: unknown }).body;
+      if (body && typeof body === 'object' && !Array.isArray(body)) return this.parseRefundWebhook(trimmed, obj as PaytmEnvelope<PaytmRefundWebhookBody>);
+    }
     let fields: Record<string, string>;
     try {
       fields = parseNotificationBody(input.rawBody);
@@ -388,37 +510,116 @@ class PaytmGateway implements PaymentGateway {
       throw new PaymentError('SIGNATURE_INVALID', `Paytm notification is for MID ${fields.MID}, not PAYTM_MID.`, { provider: 'paytm' });
     }
 
+    // Form/flat notifications are payment status webhooks; refund webhooks are nested JSON (above).
     const status = fields.STATUS ?? '';
-    // Refund notifications carry REFID/REFUNDID (shape UNVERIFIED); everything else is a payment.
-    const isRefund = Boolean(fields.REFID || fields.REFUNDID);
-    let type: WebhookEventType;
-    if (isRefund) type = status === 'TXN_SUCCESS' ? 'refund.processed' : status === 'TXN_FAILURE' ? 'refund.failed' : 'unknown';
-    else type = status === 'TXN_SUCCESS' ? 'payment.succeeded' : status === 'TXN_FAILURE' ? 'payment.failed' : status === 'PENDING' ? 'payment.pending' : 'unknown';
-
-    const amountField = isRefund ? fields.REFUNDAMOUNT ?? fields.TXNAMOUNT : fields.TXNAMOUNT;
-    const occurred = fields.TXNDATE ? Date.parse(fields.TXNDATE.replace(' ', 'T') + '+05:30') : NaN;
+    const type: WebhookEventType =
+      status === 'TXN_SUCCESS' ? 'payment.succeeded' : status === 'TXN_FAILURE' ? 'payment.failed' : status === 'PENDING' ? 'payment.pending' : 'unknown';
     return {
       provider: 'paytm',
       // Paytm sends no event id; TXNID + STATUS is stable across its retries of the same notification.
-      id: isRefund ? `refund:${fields.REFID ?? fields.REFUNDID}:${status}` : `${fields.TXNID ?? fields.ORDERID}:${status}`,
+      id: `${fields.TXNID ?? fields.ORDERID}:${status}`,
       type,
-      providerEventType: isRefund ? `REFUND_${status}` : status,
+      providerEventType: status,
       orderRef: fields.ORDERID,
       providerOrderId: fields.ORDERID,
       providerPaymentId: fields.TXNID || undefined,
-      providerRefundId: fields.REFUNDID || undefined,
-      refundRef: fields.REFID || undefined,
-      status: isRefund ? (status === 'TXN_SUCCESS' ? 'refunded' : undefined) : mapPaytmTxnStatus(status),
-      amount: amountField ? fromMajor(amountField) : undefined,
+      status: mapPaytmTxnStatus(status),
+      amount: fields.TXNAMOUNT ? fromMajor(fields.TXNAMOUNT) : undefined,
       currency: fields.CURRENCY || 'INR',
-      occurredAt: Number.isFinite(occurred) ? new Date(occurred).toISOString() : undefined,
+      occurredAt: paytmTimeToIso(fields.TXNDATE),
       raw: fields,
+    };
+  }
+
+  /**
+   * Accept Refund and Success Refund webhooks (paytmpayments.com/docs/accept-refund-webhook,
+   * /docs/success-refund-webhook): JSON `{head:{signature, version}, body:{orderId, txnId, refId,
+   * refundId, refundAmount, totalRefundAmount, status?, ...timestamps}}`. head.signature is verified
+   * against the exact raw `body` JSON substring, as for the JSON APIs (the docs say "verify with the
+   * checksum library" without naming the signed string). An unsigned notification (the documented
+   * FAILED sample has no signature) cannot be authenticated and is rejected.
+   * Accept Refund: status SUCCESS (accepted, deducted from settlement) or FAILED. Success Refund: no
+   * status field; userCreditInitiateTimestamp marks that the credit to the customer was initiated.
+   */
+  private parseRefundWebhook(raw: string, env: PaytmEnvelope<PaytmRefundWebhookBody>): NormalizedWebhookEvent {
+    const signature = env.head?.signature;
+    if (!signature) {
+      throw new PaymentError('SIGNATURE_INVALID', 'Paytm refund notification has no head.signature, so it cannot be verified.', {
+        provider: 'paytm',
+        hint: 'Confirm the refund with getRefundStatus instead of trusting an unsigned notification.',
+      });
+    }
+    const rawBody = extractRawJsonMember(raw, 'body');
+    if (!rawBody || !verifySignature(rawBody, this.creds.merchantKey, signature)) {
+      throw new PaymentError('SIGNATURE_INVALID', 'Paytm refund notification head.signature does not match the body.', {
+        provider: 'paytm',
+        hint: 'Verify the raw body JSON (exact bytes) with the merchant key of the MID that issued the refund.',
+      });
+    }
+    const b = env.body;
+    if (b.mid && b.mid !== this.creds.mid) {
+      throw new PaymentError('SIGNATURE_INVALID', `Paytm refund notification is for MID ${b.mid}, not PAYTM_MID.`, { provider: 'paytm' });
+    }
+    const st = (b.status ?? '').toUpperCase();
+    const type: WebhookEventType = st === 'FAILED' ? 'refund.failed' : st === '' || st === 'SUCCESS' ? 'refund.processed' : 'unknown';
+    const stage = b.userCreditInitiateTimestamp ? 'CREDIT_INITIATED' : st || 'UNKNOWN';
+    const txnAmount = b.txnAmount ? fromMajor(b.txnAmount) : undefined;
+    const total = b.totalRefundAmount ? fromMajor(b.totalRefundAmount) : undefined;
+    let status: PaymentStatus | undefined;
+    if (type === 'refund.processed' && total !== undefined && txnAmount !== undefined) {
+      status = total >= txnAmount ? 'refunded' : 'partially_refunded';
+    }
+    return {
+      provider: 'paytm',
+      // Accept and Success webhooks for one refund get different ids; Paytm retries keep the same one.
+      id: `refund:${b.refId ?? b.refundId}:${stage}`,
+      type,
+      providerEventType: `REFUND_${stage}`,
+      orderRef: b.orderId,
+      providerOrderId: b.orderId,
+      providerPaymentId: b.txnId || undefined,
+      providerRefundId: b.refundId || undefined,
+      refundRef: b.refId || undefined,
+      status,
+      amount: b.refundAmount ? fromMajor(b.refundAmount) : undefined,
+      currency: 'INR',
+      occurredAt: paytmTimeToIso(b.userCreditInitiateTimestamp ?? b.acceptRefundTimestamp ?? b.merchantRefundRequestTimestamp),
+      raw: env,
     };
   }
 
   async simulateWebhook(input: SimulateWebhookInput): Promise<SimulatedWebhook> {
     const txnId = input.providerPaymentId ?? `SIM${this.ctx.now().getTime()}`;
     const amount = toMajorString(input.amount);
+    // Paytm sends timestamps in IST as "YYYY-MM-DD HH:mm:ss.S".
+    const istNow = new Date(this.ctx.now().getTime() + 330 * 60_000).toISOString().replace('T', ' ').slice(0, 21);
+    if (input.type === 'refund.processed') {
+      // Mirrors the documented Success Refund webhook: nested JSON, head.signature over the body bytes.
+      const body = {
+        source: 'MERCHANT',
+        txnId,
+        orderId: input.orderRef,
+        mid: this.creds.mid,
+        txnAmount: amount,
+        refundAmount: amount,
+        totalRefundAmount: amount,
+        refId: input.refundRef ?? `REF_${input.orderRef}`,
+        refundId: `SIMRFND${txnId}`,
+        txnTimestamp: istNow,
+        merchantRefundRequestTimestamp: istNow,
+        acceptRefundTimestamp: istNow,
+        userCreditInitiateTimestamp: istNow,
+        refundDetailInfoList: [{ refundType: 'TO_SOURCE', payMethod: 'UPI', refundAmount: amount }],
+      };
+      const bodyJson = JSON.stringify(body);
+      const signature = generateSignature(bodyJson, this.creds.merchantKey);
+      return {
+        provider: 'paytm',
+        headers: { 'content-type': 'application/json' },
+        rawBody: `{"head":${JSON.stringify({ signature, version: 'v1' })},"body":${bodyJson}}`,
+        description: 'Paytm Success Refund webhook (JSON head/body) with head.signature over the raw body, signed by PAYTM_MERCHANT_KEY.',
+      };
+    }
     const fields: Record<string, string> = {
       MID: this.creds.mid,
       ORDERID: input.orderRef,
@@ -427,18 +628,9 @@ class PaytmGateway implements PaymentGateway {
       CURRENCY: input.currency ?? 'INR',
       BANKTXNID: `SIMBANK${txnId}`,
       PAYMENTMODE: 'UPI',
-      // Paytm sends TXNDATE in IST as "YYYY-MM-DD HH:mm:ss.S".
-      TXNDATE: new Date(this.ctx.now().getTime() + 330 * 60_000).toISOString().replace('T', ' ').slice(0, 21),
+      TXNDATE: istNow,
     };
-    if (input.type === 'refund.processed') {
-      // Paytm's refund notification format is not verified; this mirrors the payment notification.
-      fields.REFID = input.refundRef ?? `REF_${input.orderRef}`;
-      fields.REFUNDID = `SIMRFND${txnId}`;
-      fields.REFUNDAMOUNT = amount;
-      fields.STATUS = 'TXN_SUCCESS';
-      fields.RESPCODE = '10';
-      fields.RESPMSG = 'Refund Successful (simulated).';
-    } else if (input.type === 'payment.failed') {
+    if (input.type === 'payment.failed') {
       fields.STATUS = 'TXN_FAILURE';
       fields.RESPCODE = '227';
       fields.RESPMSG = 'Your payment has been declined by your bank (simulated).';

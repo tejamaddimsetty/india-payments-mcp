@@ -365,7 +365,7 @@ export function serviceModule(ctx: TemplateContext, opts: { singleton: boolean; 
           `  }`,
           `  // refundRef is the idempotency key: the SDK never refunds twice for the same refundRef.`,
           `  // TODO: persist it with the admin's request id BEFORE calling, and reuse it if the admin retries.`,
-          `  const refundRef = \`rf_\${randomBytes(8).toString('hex')}\`;`,
+          `  const refundRef = \`rf\${randomBytes(8).toString('hex')}\`; // alphanumeric: valid on every gateway`,
           `  const result = await payments.refund(`,
           `    PROVIDER,`,
           `    {`,

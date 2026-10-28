@@ -122,6 +122,21 @@ describe('stripe', () => {
     await expect(gw.createPayment({ orderRef: 'ord_3', amount: 4.99, returnUrl: 'https://s.example/r' })).rejects.toMatchObject({ code: 'VALIDATION' });
   });
 
+  it('enforces Stripe length limits (client_reference_id <= 200, Idempotency-Key <= 255) before calling the API', async () => {
+    const { gw, requests } = gateway([
+      { match: 'POST https://api.stripe.com/v1/checkout/sessions', body: { id: 'cs_l', url: 'https://checkout.stripe.com/x', status: 'open', amount_total: 100, currency: 'inr' } },
+      { match: 'POST https://api.stripe.com/v1/refunds', body: { id: 're_l', amount: 100, currency: 'inr', status: 'pending', metadata: {} } },
+    ]);
+    const r = 'https://s.example/r';
+    await expect(gw.createPayment({ orderRef: 'o'.repeat(201), amount: 100, returnUrl: r })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.createSubscription!({ subscriptionRef: 's'.repeat(201), plan: { name: 'P', amount: 100, interval: 'month' }, returnUrl: r })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.createPayment({ orderRef: 'o1', amount: 100, returnUrl: r, idempotencyKey: 'k'.repeat(256) })).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(gw.refund!({ orderRef: 'o1', providerPaymentId: 'pi_1', refundRef: 'f'.repeat(256) })).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(requests).toHaveLength(0);
+    await gw.createPayment({ orderRef: 'o'.repeat(200), amount: 100, returnUrl: r });
+    expect(requests).toHaveLength(1);
+  });
+
   it("payment_intent flow returns a Stripe.js action and needs the publishable key", async () => {
     const { gw, requests } = gateway([
       { match: 'POST https://api.stripe.com/v1/payment_intents', body: { id: 'pi_1', object: 'payment_intent', amount: 1000, currency: 'usd', status: 'requires_payment_method', client_secret: 'pi_1_secret_abc' } },
@@ -289,8 +304,12 @@ describe('stripe', () => {
     expect(await parse('refund.updated', { id: 're_1', amount: 300, currency: 'inr', status: 'succeeded', payment_intent: 'pi_1', metadata: { refund_ref: 'rf_1', order_ref: 'o1' } }))
       .toMatchObject({ type: 'refund.processed', providerRefundId: 're_1', refundRef: 'rf_1', orderRef: 'o1', providerPaymentId: 'pi_1' });
     expect((await parse('refund.updated', { id: 're_2', amount: 1, status: 'failed', metadata: {} })).type).toBe('refund.failed');
-    expect(await parse('charge.refunded', { id: 'ch_1', amount: 1000, amount_refunded: 400, payment_intent: 'pi_1', currency: 'inr' }))
-      .toMatchObject({ type: 'refund.processed', status: 'partially_refunded', amount: 400 });
+    // charge.refunded fires on refund creation (refund may still be pending; amount is cumulative): not a final signal.
+    const chargeRefunded = await parse('charge.refunded', { id: 'ch_1', amount: 1000, amount_refunded: 400, payment_intent: 'pi_1', currency: 'inr' });
+    expect(chargeRefunded).toMatchObject({ type: 'unknown', providerEventType: 'charge.refunded', providerPaymentId: 'pi_1' });
+    expect(chargeRefunded.amount).toBeUndefined();
+    expect((await parse('refund.created', { id: 're_3', amount: 400, status: 'pending', metadata: {} })).type).toBe('unknown');
+    expect((await parse('refund.failed', { id: 're_4', amount: 400, status: 'failed', metadata: {} })).type).toBe('refund.failed');
     expect((await parse('charge.dispute.created', { id: 'dp_1', amount: 1000, charge: 'ch_1', payment_intent: 'pi_1' })).type).toBe('dispute.created');
     expect((await parse('customer.subscription.deleted', { id: 'sub_1', status: 'canceled', metadata: { subscription_ref: 's1' } }))).toMatchObject({ type: 'subscription.cancelled', orderRef: 's1' });
     expect((await parse('customer.subscription.updated', { id: 'sub_1', status: 'past_due' }, { status: 'active' })).type).toBe('subscription.halted');
@@ -363,5 +382,7 @@ describe('stripe', () => {
     expect(stripe.capabilities.summary).toMatch(/invite-only/);
     expect(stripe.capabilities.features.payouts.support).toBe('not_implemented');
     expect(stripe.capabilities.constraints.join(' ')).toMatch(/15,000/);
+    // UPI is not available to India-domiciled Stripe accounts (docs.stripe.com/payments/upi).
+    expect(stripe.capabilities.paymentMethods).toEqual(['card']);
   });
 });
