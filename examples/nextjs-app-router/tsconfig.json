@@ -1,0 +1,22 @@
+{
+  // Mirrors a default create-next-app tsconfig. Inside this repo, "india-payments-mcp" points at
+  // ../../src so the example type-checks without building the package. In your own app, delete
+  // that path entry and `npm install india-payments-mcp`.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "ES2022"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "types": ["node"],
+    "paths": {
+      "@/*": ["./*"],
+      "india-payments-mcp": ["../../src/index.ts"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx"]
+}

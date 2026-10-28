@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "india-payments": {
+      "command": "npx",
+      "args": ["-y", "india-payments-mcp"],
+      "env": {
+        "PAYMENTS_MODE": "mock"
+      }
+    }
+  }
+}

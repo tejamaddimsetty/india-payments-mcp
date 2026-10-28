@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>india-payments-mcp checkout example</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 520px; margin: 4rem auto; padding: 0 1rem; line-height: 1.5; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 1.25rem; }
+      button { font-size: 1rem; padding: 0.7rem 1.4rem; cursor: pointer; }
+      .status { padding: 0.75rem; border-radius: 6px; background: #f3f3f3; }
+      .ok { background: #e7f6ec; }
+      .bad { background: #fdecec; }
+      code { background: #f3f3f3; padding: 0 0.25rem; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <h1>Checkout</h1>
+    <p id="config">Loading gateway…</p>
+    <div class="card">
+      <strong>Demo T-shirt</strong> &middot; Rs 499.00
+      <p><small>The price lives on the server (<code>ORDERS</code> in server.ts). The browser only sends <code>demo-order-1</code>.</small></p>
+      <button id="pay" type="button">Pay Rs 499</button>
+      <!-- Stripe Payment Element mounts here (payment_intent flow only). -->
+      <div id="payment-container"></div>
+    </div>
+    <p id="status" class="status" role="status" hidden></p>
+
+    <script type="module">
+      import { payForOrder } from './start-checkout.js';
+
+      const statusEl = document.getElementById('status');
+      const show = (text, cls = '') => {
+        statusEl.textContent = text;
+        statusEl.className = `status ${cls}`;
+        statusEl.hidden = false;
+      };
+
+      const cfg = await fetch('/api/payments/config').then((r) => r.json());
+      document.getElementById('config').innerHTML = `Gateway <code>${cfg.provider}</code>, mode <code>${cfg.mode}</code>.`;
+
+      // The server redirects back here after verifying: ?orderRef=...&status=... (display only).
+      const params = new URLSearchParams(location.search);
+      if (params.get('status')) {
+        const ok = params.get('status') === 'captured';
+        show(ok ? `Paid. Order ${params.get('orderRef')} is confirmed on the server.` : `Payment ${params.get('status')} for ${params.get('orderRef')}.`, ok ? 'ok' : 'bad');
+      }
+
+      const button = document.getElementById('pay');
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          const outcome = await payForOrder('demo-order-1', { container: document.getElementById('payment-container') });
+          if (outcome.kind === 'manual') show(outcome.instructions);
+          if (outcome.kind === 'dismissed') show('Checkout closed. You have not been charged.');
+          if (outcome.kind === 'error') show(outcome.message, 'bad');
+        } catch (err) {
+          show(err.message, 'bad');
+        } finally {
+          button.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

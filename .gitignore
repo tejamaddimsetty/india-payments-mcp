@@ -1,0 +1,20 @@
+# dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# secrets: only .env.example is committed
+.env
+.env.*
+!.env.example
+
+# audit logs (PAYMENTS_AUDIT_LOG) and other JSON Lines output
+*.jsonl
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+npm-debug.log*

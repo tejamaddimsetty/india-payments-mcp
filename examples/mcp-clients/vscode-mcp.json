@@ -1,0 +1,31 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "razorpay-key-secret",
+      "description": "Razorpay TEST key secret (rzp_test_ keys only)",
+      "password": true
+    }
+  ],
+  "servers": {
+    "india-payments": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "india-payments-mcp"],
+      "env": {
+        "PAYMENTS_MODE": "mock"
+      }
+    },
+    "india-payments-sandbox": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "india-payments-mcp"],
+      "env": {
+        "PAYMENTS_MODE": "sandbox",
+        "PAYMENTS_PROVIDERS": "razorpay",
+        "RAZORPAY_KEY_ID": "<test key id: rzp_test_...>",
+        "RAZORPAY_KEY_SECRET": "${input:razorpay-key-secret}"
+      }
+    }
+  }
+}

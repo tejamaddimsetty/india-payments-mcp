@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": ["src", "test", "examples/**/*.ts"],
+  // Framework examples need their own deps (@types/express, React/Next) and path aliases, so each has
+  // its own tsconfig.json that maps india-payments-mcp to ../../src. Check them with
+  // `npx tsc -p examples/<name>` after `npm install` in that folder.
+  "exclude": ["examples/express-checkout", "examples/nextjs-app-router", "**/node_modules"]
+}

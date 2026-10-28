@@ -1,0 +1,63 @@
+import { featureRow, type ProviderCapabilities } from '../../core/capabilities.js';
+
+export const phonepeCapabilities: ProviderCapabilities = {
+  provider: 'phonepe',
+  displayName: 'PhonePe Payment Gateway',
+  website: 'https://www.phonepe.com/business-solutions/payment-gateway/',
+  docsUrl: 'https://developer.phonepe.com/payment-gateway/website-integration/standard-checkout/api-integration/',
+  dashboardUrl: 'https://business.phonepe.com',
+  summary:
+    'UPI-first gateway from India\'s largest UPI app. Standard Checkout v2: OAuth client_credentials, a hosted PayPage (redirect or iframe), integer paise, unsigned redirect so status is always confirmed server-side.',
+  features: {
+    createPayment: featureRow('supported', 'POST /checkout/v2/pay (Standard Checkout v2). Returns a hosted PayPage redirectUrl.'),
+    verifyPayment: featureRow(
+      'partial',
+      'The redirect back to your site carries no signed data, so verification is an Order Status API call (verifiedVia: status_api). Pass orderRef: the redirect does not tell you which order it was for.',
+    ),
+    paymentStatus: featureRow('supported', 'GET /checkout/v2/order/{merchantOrderId}/status. Looks up by orderRef; providerOrderId is not needed.'),
+    refund: featureRow('supported', 'POST /payments/v2/refund. Partial refunds allowed (min 100 paise). merchantRefundId (our refundRef) de-duplicates retries.'),
+    refundStatus: featureRow('supported', 'GET /payments/v2/refund/{merchantRefundId}/status. Looks up by refundRef.'),
+    webhooks: featureRow(
+      'partial',
+      'Authorization header = sha256hex("username:password") set in the Business Dashboard. This is a static shared secret: it does NOT sign the body. Always confirm with payments_get_status before fulfilling. The newer HMAC header scheme (x-phonepe-checksum-*) is not implemented because its algorithm is undocumented.',
+    ),
+    customers: featureRow('unsupported', 'PhonePe PG has no customer object; prefill a phone number via providerOptions.prefillUserLoginDetails.'),
+    subscriptions: featureRow('not_implemented', 'PhonePe Autopay (UPI mandates, plus eNACH) exists under /payment-gateway/autopay/ but is not wired up here.'),
+    settlements: featureRow('not_implemented', 'A settlement API section exists in PhonePe docs (developer.phonepe.com/settlement); use the Business Dashboard reports for now.'),
+    payouts: featureRow('unsupported', 'PhonePe PG does not offer a public payouts / disbursal API to merchants.'),
+    paymentLinks: featureRow('not_implemented', 'PhonePe Payment Links exist (/payment-gateway/payment-links/) but are not wired up here.'),
+  },
+  paymentMethods: ['upi', 'card', 'netbanking'],
+  currencies: 'INR only.',
+  checkoutTypes: ['redirect'],
+  providerAmountFormat: 'Integer paise (same as ours).',
+  credentials: [
+    { env: 'PHONEPE_CLIENT_ID', key: 'clientId', required: true, secret: false, description: 'OAuth client id (Business Dashboard > Developer Settings; sandbox ids come from the PhonePe integration team).' },
+    { env: 'PHONEPE_CLIENT_SECRET', key: 'clientSecret', required: true, secret: true, description: 'OAuth client secret paired with the client id.' },
+    { env: 'PHONEPE_CLIENT_VERSION', key: 'clientVersion', required: true, secret: false, description: 'OAuth client version issued with the credentials. Usually "1" in sandbox.' },
+    { env: 'PHONEPE_WEBHOOK_USERNAME', key: 'webhookUsername', required: false, secret: false, description: 'Webhook username you set in the Business Dashboard. Required to verify webhooks.' },
+    { env: 'PHONEPE_WEBHOOK_PASSWORD', key: 'webhookPassword', required: false, secret: true, description: 'Webhook password you set in the Business Dashboard. Required to verify webhooks.' },
+  ],
+  constraints: [
+    'Minimum amount is 100 paise (Rs 1), for payments and refunds.',
+    'merchantOrderId (our orderRef) max 63 characters; only letters, digits, "_" and "-".',
+    'returnUrl is required: PhonePe sends the customer back there after the PayPage. That redirect is unsigned, so never trust it; call payments_get_status.',
+    'Webhooks are authenticated only by a static Authorization header (sha256 of "username:password"), which does not cover the body. Always confirm with payments_get_status before fulfilling.',
+    'Re-using a merchantOrderId that has progressed past CREATED returns BAD_REQUEST. Use a fresh orderRef per attempt.',
+    'expireAfter (providerOptions) must be 300 to 3600 seconds.',
+    'Production uses two hosts: OAuth on api.phonepe.com/apis/identity-manager, payments on api.phonepe.com/apis/pg. Sandbox uses api-preprod.phonepe.com/apis/pg-sandbox for both.',
+    'OAuth tokens expire (expires_at, epoch seconds). This adapter caches the token per gateway instance and refreshes it shortly before expiry or after a 401.',
+    'Legacy PG v1 (X-VERIFY = sha256hex(base64Payload + apiPath + saltKey) + "###" + saltIndex, merchant id + salt key credentials) is deprecated and NOT supported. Migrate to v2 OAuth credentials.',
+    'Webhook URL, username and password are configured in the Business Dashboard (in sandbox, ask the PhonePe integration team).',
+  ],
+  officialSdks: {
+    android: 'https://developer.phonepe.com/payment-gateway/mobile-app-integration/standard-checkout-android/',
+    ios: 'https://developer.phonepe.com/payment-gateway/mobile-app-integration/standard-checkout-ios/',
+    node: 'https://developer.phonepe.com/payment-gateway/backend-sdk/nodejs-be-sdk/',
+    web: 'Iframe PayPage: load the PhonePe checkout bundle and call window.PhonePeCheckout.transact({ tokenUrl: redirectUrl, type: "IFRAME", callback }).',
+  },
+  platformPlugins: {
+    woocommerce: 'https://wordpress.org/plugins/phonepe-payment-solutions/',
+  },
+  lastVerified: '2026-10-28',
+};

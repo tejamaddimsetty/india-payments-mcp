@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "india-payments": {
+      "command": "npx",
+      "args": ["-y", "india-payments-mcp"],
+      "env": {
+        "PAYMENTS_MODE": "mock"
+      }
+    },
+    "india-payments-sandbox": {
+      "command": "npx",
+      "args": ["-y", "india-payments-mcp"],
+      "env": {
+        "PAYMENTS_MODE": "sandbox",
+        "PAYMENTS_PROVIDERS": "razorpay",
+        "RAZORPAY_KEY_ID": "<test key id: rzp_test_...>",
+        "RAZORPAY_KEY_SECRET": "<test key secret>",
+        "RAZORPAY_WEBHOOK_SECRET": "<webhook secret you set in the dashboard>"
+      }
+    }
+  }
+}

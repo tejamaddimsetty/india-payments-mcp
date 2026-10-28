@@ -1,0 +1,12 @@
+export { PaymentsClient, createPaymentsClient, type PaymentsClientOptions } from './client.js';
+export * from './core/types.js';
+export * from './core/errors.js';
+export type { ProviderCapabilities, FeatureKey, SupportLevel, CredentialSpec } from './core/capabilities.js';
+export type { PaymentGateway, ProviderModule, AdapterContext } from './core/gateway.js';
+export { type IdempotencyStore, MemoryIdempotencyStore } from './core/idempotency.js';
+export { type AuditSink, FileAuditSink, MemoryAuditSink } from './core/audit.js';
+export { createLogger, type Logger } from './core/logger.js';
+export { toMajorString, fromMajor } from './core/money.js';
+export { createWebhookHandler, MemoryWebhookDedupeStore, type WebhookDedupeStore } from './webhooks/handler.js';
+export { PROVIDERS, allCapabilities } from './providers/index.js';
+export { createMcpServer } from './mcp/server.js';

@@ -1,0 +1,23 @@
+---
+description: Indian payment gateway integrations (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe India, Skydo) - checkout, UPI, callbacks, webhooks, refunds, subscriptions, reconciliation
+globs:
+alwaysApply: false
+---
+
+# India payments
+
+When adding, fixing or reviewing payment code for an Indian gateway, follow `skills/india-payments/SKILL.md` (procedure, non-negotiable rules, test plan, go-live checklist). Gateway facts are in `skills/india-payments/references/<gateway>.md`; the reference schema and state machine are in `skills/india-payments/references/payment-module-architecture.md`; Shopify, WooCommerce, Next.js, Django, Laravel and mobile notes are in `skills/india-payments/references/platforms.md`. Read the relevant files before writing code.
+
+If the `india-payments` MCP server is connected, call `payments_get_capabilities` before designing and `payments_generate_integration` to scaffold.
+
+Rules you must not break:
+
+- Amount computed on the server; never accepted from the client. Store integer paise; convert only at the gateway edge (Cashfree rupee number; PayU/Paytm/CCAvenue rupee strings).
+- Mark paid only after constant-time signature verification or a status-API confirmation (PhonePe, Cashfree are unsigned), with order id and amount matched against stored values.
+- Webhooks: raw body, verify, dedupe by event id (unique constraint), guarded status update, 2xx fast.
+- Unique orderRef per attempt; idempotent creation. Refunds idempotent by a refundRef reused on retry.
+- Secrets server-only (no `NEXT_PUBLIC_`/`VITE_`/`EXPO_PUBLIC_`/`REACT_APP_`, no mobile bundles, no logs).
+- Reconciliation job for stuck attempts; handle pending UPI without failing on timeout.
+- Shopify: install the gateway's official app; do not write a checkout gateway. Skydo: no API. Stripe India: invite-only.
+
+When working on the india-payments-mcp repository itself, follow `AGENTS.md`.
