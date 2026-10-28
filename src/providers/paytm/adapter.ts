@@ -787,4 +787,8 @@ export const paytm: ProviderModule<PaytmCredentials> = {
     const info = d?.body?.resultInfo ?? d?.resultInfo;
     return { code: info?.resultCode ?? d?.errorCode, message: info?.resultMsg ?? d?.errorMessage };
   },
+  protectedOptionKeys: {
+    // splitSettlementInfo routes money to other MIDs; userInfo carries custId; requestType switches the flow (e.g. subscriptions).
+    payment: ['splitSettlementInfo', 'callbackUrl', 'txnAmount', 'mid', 'orderId', 'websiteName', 'requestType', 'userInfo'],
+  },
 };

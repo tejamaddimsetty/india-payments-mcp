@@ -117,6 +117,11 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
               try {
                 client.gateway(id);
               } catch (e) {
+                // CONFIG_MISSING from a gateway with no single required variable (Skydo: receiving
+                // accounts and/or the Zoho bridge) means "not configured yet", not a broken setup.
+                if (e instanceof PaymentError && e.code === 'CONFIG_MISSING') {
+                  return { ...report, ready: false, setup: [e.message, e.hint].filter(Boolean).join(' ') };
+                }
                 initError = (e as Error).message;
               }
             }
@@ -163,7 +168,12 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
         notify_url: z.string().url().optional().describe('Server-to-server notification URL where the gateway takes it per request'),
         metadata: z.record(z.string(), z.string()).optional(),
         idempotency_key: z.string().max(64).optional().describe('Defaults to order_ref'),
-        provider_options: z.record(z.string(), z.unknown()).optional().describe('Provider-specific fields merged into the request'),
+        provider_options: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            'Provider-specific extra fields merged into the gateway request (e.g. Stripe flow, PhonePe expireAfter, Cashfree order_expiry_time). Fields that set the amount, order id, URLs or metadata, route money elsewhere (splits, transfers, connected accounts) or change capture are refused with VALIDATION.',
+          ),
         include_raw: includeRaw,
       },
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -195,7 +205,7 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
     {
       title: 'Verify payment callback',
       description:
-        'Verify the payload the browser/app received after checkout (Razorpay handler response, PayU/CCAvenue/Paytm POST-back, etc.). Fulfil ONLY when paid=true. valid=true just means the callback is genuine; a genuine failure is still valid. For gateways that do not sign callbacks it confirms through the status API.',
+        'Verify the payload the browser/app received after checkout (Razorpay handler response, PayU/CCAvenue/Paytm POST-back, etc.). Fulfil ONLY when paid=true: the callback is genuine, bound to order_ref and expected_amount, and the money is captured (status captured or partially_refunded). status=authorized (authorised, not captured) and status=refunded are NOT paid. valid=true just means the callback is genuine; a genuine failure is still valid. For gateways that do not sign callbacks it confirms through the status API.',
       inputSchema: {
         provider,
         payload: z.record(z.string(), z.string()).describe('Callback fields exactly as received'),
@@ -216,11 +226,20 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
     'payments_get_status',
     {
       title: 'Payment status',
-      description: 'Fetch the authoritative payment status from the gateway (source of truth for reconciliation).',
-      inputSchema: { provider, order_ref: ref, provider_order_id: z.string().optional(), include_raw: includeRaw },
+      description: 'Fetch the authoritative payment status from the gateway (source of truth for reconciliation). Razorpay and Stripe need provider_order_id; CCAvenue accepts provider_payment_id (reference_no).',
+      inputSchema: {
+        provider,
+        order_ref: ref,
+        provider_order_id: z.string().optional().describe('providerOrderId from payments_create_payment (Razorpay order_..., Stripe cs_/pi_...). Required for Razorpay and Stripe.'),
+        provider_payment_id: z.string().optional().describe('Optional gateway payment id (CCAvenue reference_no / tracking_id).'),
+        include_raw: includeRaw,
+      },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async (a) => run(async () => slim(await client.getPaymentStatus(a.provider, { orderRef: a.order_ref, providerOrderId: a.provider_order_id }), a.include_raw)),
+    async (a) =>
+      run(async () =>
+        slim(await client.getPaymentStatus(a.provider, { orderRef: a.order_ref, providerOrderId: a.provider_order_id, providerPaymentId: a.provider_payment_id }), a.include_raw),
+      ),
   );
 
   server.registerTool(
@@ -228,7 +247,7 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
     {
       title: 'Refund payment',
       description:
-        'Refund all or part of a captured payment. refund_ref is the idempotency key: re-sending it after a success returns the same refund. If a call fails with OUTCOME_UNKNOWN, check payments_get_refund_status / payments_get_status BEFORE retrying. In live mode this moves real money: ask the human first, then pass confirm=true.',
+        'Refund all or part of a captured payment. refund_ref is the idempotency key: within this server process (24 h) re-sending it returns the stored refund, and if the gateway reports the refund_ref as a duplicate or the outcome is unknown, the existing refund is looked up by refund_ref and returned where the gateway supports that (Razorpay, Cashfree, Paytm, PhonePe, Stripe). Across restarts, and on PayU / CCAvenue, a repeat can fail instead of returning the earlier refund. If a call fails with OUTCOME_UNKNOWN, check payments_get_refund_status / payments_get_status BEFORE retrying, and never retry with a new refund_ref. Razorpay, PayU, Paytm, CCAvenue and Stripe need provider_payment_id. In live mode this moves real money: ask the human first, then pass confirm=true.',
       inputSchema: {
         provider,
         order_ref: ref,
@@ -259,7 +278,8 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
     'payments_get_refund_status',
     {
       title: 'Refund status',
-      description: 'Fetch refund status from the gateway.',
+      description:
+        'Fetch refund status from the gateway. Ids needed per gateway: Razorpay: provider_refund_id (rfnd_...), or provider_payment_id (pay_...) to find it by refund_ref. PayU: provider_refund_id (the request_id returned by payments_refund). Cashfree and Paytm: order_ref + refund_ref. PhonePe: refund_ref. Stripe: provider_refund_id (re_...) or provider_payment_id (pi_/ch_...). CCAvenue: not available (check the dashboard).',
       inputSchema: {
         provider,
         refund_ref: ref,

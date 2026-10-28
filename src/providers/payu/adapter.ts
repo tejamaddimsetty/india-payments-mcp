@@ -161,12 +161,19 @@ interface PayuRefundResponse {
 }
 
 /**
- * PayU's top-level `status` is success/failure/pending. `unmappedstatus` is finer grained
- * (captured, auth, userCancelled, dropped, bounced...) and is used where it adds information.
+ * PayU's top-level `status` is success/failure/pending, and is covered by the response hash.
+ * `unmappedstatus` (captured, auth, userCancelled, dropped, bounced...) is NOT covered by the hash,
+ * so on a callback it could be tampered with. It is therefore only allowed to DOWNGRADE a status
+ * (success -> authorized / cancelled), never to upgrade one: whatever it says, the result is never
+ * better than what the hashed `status` alone gives. If your account uses auth-and-capture, an edited
+ * unmappedstatus could hide an `auth`; confirm with getPaymentStatus (verify_payment API) before
+ * fulfilling in that setup.
  */
 export function mapPayuStatus(status: string | undefined, unmapped?: string): PaymentStatus {
   const s = (status ?? '').toLowerCase();
   const u = (unmapped ?? '').toLowerCase();
+  // Every refinement lowers the outcome (to cancelled / authorized); none can turn a non-success into
+  // a paid state, because only status === 'success' ever yields 'captured'.
   if (u === 'usercancelled') return 'cancelled';
   if (s === 'success') return u === 'auth' ? 'authorized' : 'captured';
   if (s === 'failure' || s === 'failed') return 'failed';
@@ -441,6 +448,18 @@ class PayuGateway implements PaymentGateway {
     const accepted = typeof data === 'object' && (data.status === 1 || String(data.error_code ?? '') === '102');
     if (!accepted) {
       const msg = typeof data === 'object' ? data.msg : String(data).slice(0, 200);
+      const code = typeof data === 'object' && data.error_code !== undefined ? String(data.error_code) : undefined;
+      if (code === '106' || /token already exists/i.test(msg ?? '')) {
+        // The refundRef (token_id) was used before: a refund under it most likely EXISTS. PayU has no
+        // lookup by token_id, so this is not "rejected": the caller must check before doing anything.
+        throw new PaymentError('OUTCOME_UNKNOWN', `PayU already has a refund request with token_id ${input.refundRef} (error 106): it was probably created by an earlier attempt.`, {
+          provider: 'payu',
+          providerCode: code,
+          providerMessage: msg,
+          raw: data,
+          hint: 'Do NOT retry with a new refundRef. Find the earlier refund (request_id) in the PayU dashboard or your logs and check it with getRefundStatus(providerRefundId).',
+        });
+      }
       throw new PaymentError('PROVIDER_ERROR', `PayU refund rejected${msg ? `: ${msg}` : ''}`, {
         provider: 'payu',
         providerCode: typeof data === 'object' && data.error_code !== undefined ? String(data.error_code) : undefined,
@@ -612,5 +631,9 @@ export const payu: ProviderModule<PayuCredentials> = {
       return { code: code !== undefined ? String(code) : undefined, message: d.msg ?? d.message };
     }
     return { message: typeof data === 'string' && data ? data.slice(0, 200) : undefined };
+  },
+  protectedOptionKeys: {
+    // Hashed / binding fields, redirect URLs, splitRequest (split settlement), si / si_details (standing-instruction mandate).
+    payment: ['key', 'txnid', 'amount', 'productinfo', 'firstname', 'email', 'surl', 'furl', 'hash', 'splitRequest', 'si', 'si_details', 'api_version'],
   },
 };

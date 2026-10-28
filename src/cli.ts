@@ -4,6 +4,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { PaymentsClient } from './client.js';
+import { PaymentError } from './core/errors.js';
 import { createMcpServer } from './mcp/server.js';
 import { VERSION } from './version.js';
 
@@ -46,21 +47,34 @@ function doctor() {
   for (const id of client.providers()) {
     const r = client.configReport(id);
     let status = r.ready ? 'ready' : 'not configured';
+    let setup: string | undefined;
     if (r.ready && client.mode !== 'mock') {
       try {
         client.gateway(id);
       } catch (e) {
-        status = `ERROR: ${(e as Error).message}`;
+        // CONFIG_MISSING from a gateway with no single required variable (Skydo) = not set up yet.
+        if (e instanceof PaymentError && e.code === 'CONFIG_MISSING') {
+          status = 'not configured';
+          setup = [e.message, e.hint].filter(Boolean).join(' ');
+        } else {
+          status = `ERROR: ${(e as Error).message}`;
+        }
       }
     }
     if (client.mode === 'mock') status = 'mock';
     if (status === 'ready' || status === 'mock') ready++;
     console.log(`${id.padEnd(10)} ${status}`);
     if (!r.ready && client.mode !== 'mock') console.log(`           missing: ${r.missing.join(', ')}`);
-    if (r.optionalMissing.length && client.mode !== 'mock') console.log(`           optional: ${r.optionalMissing.join(', ')}`);
+    if (setup) console.log(`           setup: ${setup}`);
+    else if (r.optionalMissing.length && client.mode !== 'mock') console.log(`           optional: ${r.optionalMissing.join(', ')}`);
   }
   console.log(`\n${ready} gateway(s) usable.${ready === 0 ? ' Set PAYMENTS_MODE=mock to try everything without credentials.' : ''}`);
 }
+
+/** HTTP sessions idle for longer than this are closed. */
+const SESSION_IDLE_MS = 30 * 60_000;
+const SESSION_SWEEP_MS = 60_000;
+const MAX_SESSIONS = 1000;
 
 function bearerOk(req: IncomingMessage, token: string) {
   const got = req.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
@@ -76,24 +90,48 @@ async function serveHttp() {
     process.exit(2);
   }
   const host = process.env.MCP_HTTP_HOST ?? '127.0.0.1';
-  const port = Number(process.env.MCP_HTTP_PORT ?? 8787);
+  const portRaw = process.env.MCP_HTTP_PORT ?? '8787';
+  const port = Number(portRaw);
+  if (!/^\d+$/.test(portRaw) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error(`MCP_HTTP_PORT must be an integer between 1 and 65535 (got "${portRaw}").`);
+    process.exit(2);
+  }
   const client = new PaymentsClient({ actor: 'mcp:http', guardLiveMutations: true });
-  const sessions = new Map<string, StreamableHTTPServerTransport>();
+  const sessions = new Map<string, { transport: StreamableHTTPServerTransport; lastSeen: number }>();
+  // Evict idle sessions so repeated `initialize` calls cannot grow memory without bound.
+  const sweep = setInterval(() => {
+    const cutoff = Date.now() - SESSION_IDLE_MS;
+    for (const [id, s] of sessions) {
+      if (s.lastSeen < cutoff) {
+        sessions.delete(id);
+        void s.transport.close().catch(() => {});
+      }
+    }
+  }, SESSION_SWEEP_MS);
+  sweep.unref();
 
   const http = createServer(async (req, res) => {
     if (req.url === '/healthz') {
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, version: VERSION, mode: client.mode }));
       return;
     }
-    if (!req.url?.startsWith('/mcp')) return void res.writeHead(404).end();
+    // Exact path: '/mcp' (optionally with a query string), not '/mcpfoo'.
+    const path = (req.url ?? '').split('?')[0];
+    if (path !== '/mcp') return void res.writeHead(404).end();
     if (!bearerOk(req, token)) return void res.writeHead(401, { 'www-authenticate': 'Bearer' }).end();
 
     const sid = req.headers['mcp-session-id'];
-    let transport = typeof sid === 'string' ? sessions.get(sid) : undefined;
+    const existing = typeof sid === 'string' ? sessions.get(sid) : undefined;
+    if (existing) existing.lastSeen = Date.now();
+    let transport = existing?.transport;
     if (!transport) {
+      if (sessions.size >= MAX_SESSIONS) {
+        res.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'too many sessions' }));
+        return;
+      }
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => void sessions.set(id, transport!),
+        onsessioninitialized: (id) => void sessions.set(id, { transport: transport!, lastSeen: Date.now() }),
       });
       transport.onclose = () => {
         if (transport?.sessionId) sessions.delete(transport.sessionId);

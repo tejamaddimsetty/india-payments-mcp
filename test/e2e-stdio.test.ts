@@ -100,14 +100,18 @@ describe('MCP server over stdio (mock mode)', () => {
       const wrongAmount = await call(client, 'payments_verify_payment', { provider, payload, order_ref: ref, expected_amount: 100 });
       expect(wrongAmount.data.paid).toBe(false);
 
-      const status = await call(client, 'payments_get_status', { provider, order_ref: ref });
+      // Ids are passed exactly as the real adapters require them (the mock enforces the same rules).
+      const ids = { provider_order_id: created.data.providerOrderId };
+      const status = await call(client, 'payments_get_status', { provider, order_ref: ref, ...ids });
       expect(status.data.status).toBe('captured');
+      const paymentId = status.data.providerPaymentId;
+      expect(paymentId).toBeTruthy();
 
-      const refund = await call(client, 'payments_refund', { provider, order_ref: ref, refund_ref: `rf_${provider}`, amount: 9900 });
+      const refund = await call(client, 'payments_refund', { provider, order_ref: ref, refund_ref: `rf_${provider}`, amount: 9900, provider_payment_id: paymentId });
       expect(refund.data).toMatchObject({ status: 'processed', amount: 9900 });
-      const again = await call(client, 'payments_refund', { provider, order_ref: ref, refund_ref: `rf_${provider}`, amount: 9900 });
+      const again = await call(client, 'payments_refund', { provider, order_ref: ref, refund_ref: `rf_${provider}`, amount: 9900, provider_payment_id: paymentId });
       expect(again.data.providerRefundId).toBe(refund.data.providerRefundId);
-      expect((await call(client, 'payments_get_status', { provider, order_ref: ref })).data.status).toBe('partially_refunded');
+      expect((await call(client, 'payments_get_status', { provider, order_ref: ref, ...ids })).data.status).toBe('partially_refunded');
       const rs = await call(client, 'payments_get_refund_status', { provider, refund_ref: `rf_${provider}`, order_ref: ref });
       if (provider === 'ccavenue') {
         // CCAvenue refund status is not implemented: the server must say so rather than guess.
@@ -198,6 +202,8 @@ describe('MCP server over Streamable HTTP', () => {
       const base = `http://127.0.0.1:${port}`;
       expect((await fetch(`${base}/healthz`)).status).toBe(200);
       expect((await fetch(`${base}/mcp`, { method: 'POST', body: '{}' })).status).toBe(401);
+      // Exact path match: /mcpfoo is not the MCP endpoint.
+      expect((await fetch(`${base}/mcpfoo`, { method: 'POST', body: '{}', headers: { authorization: `Bearer ${token}` } })).status).toBe(404);
       expect((await fetch(`${base}/mcp`, { method: 'POST', body: '{}', headers: { authorization: 'Bearer wrong' } })).status).toBe(401);
 
       const client = new Client({ name: 'e2e-http', version: '0' });
@@ -211,6 +217,29 @@ describe('MCP server over Streamable HTTP', () => {
       child.kill();
     }
   }, 30_000);
+
+  it('refuses an invalid MCP_HTTP_PORT', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const r = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'http'], {
+      env: { PATH: process.env.PATH ?? '', MCP_HTTP_TOKEN: 'e2e-token-0123456789abcdef0123456789', MCP_HTTP_PORT: 'eighty' },
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('MCP_HTTP_PORT');
+  }, 20_000);
+
+  it('doctor lists an unconfigured Skydo as not configured, not ERROR', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const r = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'doctor'], {
+      env: { PATH: process.env.PATH ?? '', PAYMENTS_MODE: 'sandbox', HOME: process.env.HOME ?? '' },
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    const line = r.stdout.split('\n').find((l) => l.startsWith('skydo'));
+    expect(line).toMatch(/not configured/);
+    expect(r.stdout).not.toMatch(/skydo\s+ERROR/);
+  }, 20_000);
 
   it('refuses to start without a strong token', async () => {
     const { spawnSync } = await import('node:child_process');

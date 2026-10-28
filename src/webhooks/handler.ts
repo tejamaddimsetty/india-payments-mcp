@@ -39,7 +39,9 @@ export class MemoryWebhookDedupeStore implements WebhookDedupeStore {
 }
 
 function typeForStatus(status: PaymentStatus): WebhookEventType {
-  if (status === 'captured' || status === 'refunded' || status === 'partially_refunded') return 'payment.succeeded';
+  // Same rule as PaymentsClient's `paid`: a fully refunded payment is not a success to fulfil.
+  if (status === 'captured' || status === 'partially_refunded') return 'payment.succeeded';
+  if (status === 'refunded') return 'unknown';
   if (status === 'authorized') return 'payment.authorized';
   if (status === 'failed' || status === 'cancelled' || status === 'expired') return 'payment.failed';
   return 'payment.pending';
@@ -60,7 +62,9 @@ export interface WebhookHandlerResult {
 
 /**
  * Framework-agnostic webhook endpoint logic:
- *   verify signature -> dedupe by event id -> run your handler -> 200.
+ *   verify signature -> (confirm via status API when the body is unauthenticated) -> dedupe by
+ *   event id -> run your handler -> 200. For unauthenticated bodies (PhonePe, CCAvenue) the dedupe
+ *   id is rebuilt from the confirmed order ref + status + payment id, never taken from the body.
  *
  * Status codes follow what gateways expect: 2xx = "delivered, stop retrying"; 4xx for a bad
  * signature (a retry will not fix it); 5xx when YOUR handler failed, so the gateway retries.
@@ -88,6 +92,10 @@ export function createWebhookHandler(opts: WebhookHandlerOptions) {
         const confirmed = await opts.client.getPaymentStatus(opts.provider, { orderRef: event.orderRef, providerOrderId: event.providerOrderId });
         event = {
           ...event,
+          // The body's id is attacker-controlled (built from unauthenticated fields), so a forged
+          // delivery could claim the id a genuine later event will carry and get it dropped as a
+          // duplicate. Dedupe on what the gateway confirmed instead.
+          id: `confirmed:${event.orderRef}:${confirmed.status}:${confirmed.providerPaymentId ?? ''}`,
           type: typeForStatus(confirmed.status),
           status: confirmed.status,
           amount: confirmed.amount,

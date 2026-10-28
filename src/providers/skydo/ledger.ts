@@ -1,4 +1,5 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { PaymentError } from '../../core/errors.js';
 import type { PaymentStatus } from '../../core/types.js';
@@ -9,8 +10,10 @@ import type { PaymentStatus } from '../../core/types.js';
  * WhatsApp notification, the dashboard, or a FIRA).
  *
  * The file is shared by every process that uses it (typically your app creates orders and the MCP
- * server records receipts), so every read-modify-write takes an exclusive lock file and re-reads the
- * ledger inside the lock. Writes are atomic (temp file + rename) and the file is private (0600).
+ * server records receipts), so every read-modify-write holds an exclusive lock file and re-reads the
+ * ledger inside the lock. Lock waits are asynchronous (the event loop keeps running), a lock is only
+ * ever removed by its owner or as provably stale, and writes are fsynced then atomically renamed.
+ * Use a local disk: lock files are not reliable on network file systems.
  */
 export interface LedgerReceipt {
   /** Skydo transaction reference, FIRA number, or any id unique to this receipt. Used to dedupe. */
@@ -39,12 +42,16 @@ interface LedgerFile {
   entries: LedgerEntry[];
 }
 
-const LOCK_TIMEOUT_MS = 5_000;
-/** A lock older than this was left by a crashed process. */
-const STALE_LOCK_MS = 30_000;
+/** How long a writer waits for the lock. Longer than STALE_LOCK_MS so a crashed holder never strands it. */
+const LOCK_TIMEOUT_MS = 15_000;
+/** Critical sections take milliseconds; a lock this old was left by a crashed process. */
+const STALE_LOCK_MS = 10_000;
 
-function sleepSync(ms: number) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Receipt ids compare case- and whitespace-insensitively ("sky-1 " == "SKY-1"). */
+export function normalizeReceiptId(id: string): string {
+  return id.trim().toUpperCase();
 }
 
 export class SkydoLedger {
@@ -79,42 +86,68 @@ export class SkydoLedger {
 
   private write(map: Map<string, LedgerEntry>) {
     if (!this.file) return;
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ version: 1, entries: [...map.values()] } satisfies LedgerFile, null, 2), { mode: 0o600 });
-    renameSync(tmp, this.file);
+    const tmp = `${this.file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+    const fd = openSync(tmp, 'w', 0o600);
+    try {
+      writeSync(fd, JSON.stringify({ version: 1, entries: [...map.values()] } satisfies LedgerFile, null, 2));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      renameSync(tmp, this.file);
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // nothing to clean up
+      }
+      throw err;
+    }
   }
 
-  private withLock<T>(fn: () => T): T {
+  private async withLock<T>(fn: () => T): Promise<T> {
     if (!this.file) return fn();
     mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
     const lock = `${this.file}.lock`;
+    const token = `${process.pid}:${randomUUID()}`;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
-    let fd: number | undefined;
-    while (fd === undefined) {
+    for (;;) {
       try {
-        fd = openSync(lock, 'wx', 0o600);
+        const fd = openSync(lock, 'wx', 0o600);
+        writeSync(fd, token);
+        closeSync(fd);
+        break;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-        try {
-          if (Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS) unlinkSync(lock);
-        } catch {
-          // the holder released it between our checks
-        }
-        if (Date.now() > deadline) {
-          throw new PaymentError('PROVIDER_UNAVAILABLE', `Skydo ledger ${this.file} is locked by another process.`, { provider: 'skydo' });
-        }
-        sleepSync(20);
       }
+      this.breakIfStale(lock);
+      if (Date.now() > deadline) {
+        throw new PaymentError('PROVIDER_UNAVAILABLE', `Skydo ledger ${this.file} is locked by another process.`, { provider: 'skydo', hint: 'Retry in a moment.' });
+      }
+      await sleep(25);
     }
     try {
       return fn();
     } finally {
-      closeSync(fd);
+      // Only remove the lock if it is still ours (it could have been broken as stale and re-taken).
       try {
-        unlinkSync(lock);
+        if (readFileSync(lock, 'utf8') === token) unlinkSync(lock);
       } catch {
-        // already removed as stale by another process
+        // already gone
       }
+    }
+  }
+
+  /** Claim a stale lock by renaming it to a unique name first: only one process can win that rename. */
+  private breakIfStale(lock: string) {
+    try {
+      if (Date.now() - statSync(lock).mtimeMs <= STALE_LOCK_MS) return;
+      const grave = `${lock}.stale.${process.pid}.${randomUUID().slice(0, 8)}`;
+      renameSync(lock, grave);
+      unlinkSync(grave);
+    } catch {
+      // someone else released or broke it first
     }
   }
 
@@ -128,14 +161,17 @@ export class SkydoLedger {
   }
 
   /**
-   * Atomic read-modify-write of one entry. `fn` receives the current entry (or undefined) and returns
-   * the new one, or undefined to leave the ledger unchanged.
+   * Atomic read-modify-write of one entry. `fn` receives the current entry (or undefined) and the whole
+   * ledger (read-only, for cross-order checks) and returns the new entry, or undefined for no change.
    */
-  update(orderRef: string, fn: (current: LedgerEntry | undefined) => LedgerEntry | undefined): LedgerEntry | undefined {
+  update(
+    orderRef: string,
+    fn: (current: LedgerEntry | undefined, all: ReadonlyMap<string, LedgerEntry>) => LedgerEntry | undefined,
+  ): Promise<LedgerEntry | undefined> {
     return this.withLock(() => {
       const map = this.read();
       const current = map.get(orderRef);
-      const next = fn(current ? structuredClone(current) : undefined);
+      const next = fn(current ? structuredClone(current) : undefined, map);
       if (!next) return current ? structuredClone(current) : undefined;
       map.set(orderRef, structuredClone(next));
       this.write(map);

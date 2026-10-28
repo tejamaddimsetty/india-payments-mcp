@@ -134,7 +134,7 @@ describe('razorpay', () => {
         { id: 'pay_a', status: 'failed', amount: 500, amount_refunded: 0, currency: 'INR', method: 'card', created_at: 1 },
         { id: 'pay_b', status: 'captured', amount: 500, amount_refunded: 200, currency: 'INR', method: 'upi', created_at: 2 },
       ] } },
-      { match: '/orders/order_5', body: { id: 'order_5', amount: 500, currency: 'INR', receipt: 'ord_5', status: 'paid', notes: {} } },
+      { match: '/orders/order_5', body: { id: 'order_5', amount: 500, amount_paid: 500, currency: 'INR', receipt: 'ord_5', status: 'paid', notes: {} } },
     ]);
     const st = await gw.getPaymentStatus({ orderRef: 'ord_5', providerOrderId: 'order_5' });
     // captured with 200 of 500 refunded

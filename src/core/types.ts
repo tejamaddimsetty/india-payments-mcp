@@ -133,9 +133,11 @@ export interface VerifyPaymentResult {
    */
   valid: boolean;
   /**
-   * Set by PaymentsClient: valid && status is captured/authorized (or already refunded). The one
-   * field to check before fulfilling an order. `authorized` counts because Razorpay/Stripe card
-   * payments are authorised first; make sure auto-capture is on or capture them.
+   * Set by PaymentsClient: valid && status is `captured` or `partially_refunded` && the callback was
+   * bound to your orderRef and expectedAmount. The one field to check before fulfilling an order.
+   * `authorized` is NOT paid (this library has no capture API, and uncaptured authorisations lapse:
+   * enable auto-capture on Razorpay, and do not use manual capture on Stripe). A fully `refunded`
+   * payment is NOT paid, so replaying an old success URL after a refund cannot re-fulfil an order.
    */
   paid?: boolean;
   status: PaymentStatus;
@@ -197,6 +199,12 @@ export interface RefundResult {
   raw: unknown;
 }
 
+/**
+ * Which ids each gateway needs: Razorpay: providerRefundId (rfnd_), or providerPaymentId (pay_) to find
+ * it by refundRef. PayU: providerRefundId (request_id). Cashfree, Paytm, PhonePe: orderRef + refundRef
+ * (PhonePe: refundRef alone). Stripe: providerRefundId (re_), or providerPaymentId (pi_/ch_).
+ * CCAvenue: no refund-status lookup.
+ */
 export interface RefundStatusInput {
   refundRef: string;
   orderRef?: string;
@@ -237,6 +245,13 @@ export interface NormalizedWebhookEvent {
   providerPaymentId?: string;
   providerRefundId?: string;
   refundRef?: string;
+  /**
+   * The PAYMENT's status as of this event. Rule for refund.* events: `status` is set only when the
+   * event itself carries enough to tell a full from a partial refund (Razorpay: the payment entity;
+   * Paytm: totalRefundAmount vs txnAmount), as `refunded` / `partially_refunded`; otherwise
+   * (Cashfree, PhonePe, Stripe, mock) it is undefined. The refund's own outcome is `type`
+   * (refund.processed / refund.failed). Call getPaymentStatus for the payment's state.
+   */
   status?: PaymentStatus;
   amount?: number;
   currency?: string;

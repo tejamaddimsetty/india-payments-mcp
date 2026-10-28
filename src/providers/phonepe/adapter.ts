@@ -614,4 +614,7 @@ export const phonepe: ProviderModule<PhonepeCredentials> = {
     if (!d || typeof d !== 'object') return {};
     return { code: d.code ?? d.error, message: d.message ?? d.error_description };
   },
+  protectedOptionKeys: {
+    payment: ['merchantOrderId', 'amount', 'paymentFlow', 'merchantUrls'],
+  },
 };

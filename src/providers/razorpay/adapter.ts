@@ -107,6 +107,11 @@ export function mapRazorpayPaymentStatus(p: Pick<RzpPayment, 'status' | 'amount'
   }
 }
 
+/** The order is paid in full: Razorpay marks it `paid` and amount_paid covers the amount. */
+export function razorpayOrderFullyPaid(order: Pick<RzpOrder, 'status' | 'amount' | 'amount_paid'>): boolean {
+  return order.status === 'paid' && typeof order.amount_paid === 'number' && order.amount_paid >= order.amount;
+}
+
 function mapRefundStatus(s: string | undefined): RefundStatus {
   if (s === 'processed') return 'processed';
   if (s === 'pending') return 'pending';
@@ -263,6 +268,12 @@ class RazorpayGateway implements PaymentGateway {
 
     // The signature proves the payment belongs to the order. To bind it to the caller's orderRef
     // and amount we must look the order up (the browser payload carries neither).
+    // A valid signature only proves the payment was AUTHORISED. Whether money was collected is read
+    // from the order: `paid` with amount_paid covering the whole amount means captured. Manual-capture
+    // accounts and partial payments (partial_payment) leave the order `attempted`.
+    let status: PaymentStatus = 'authorized';
+    let amount: number | undefined;
+    let reason: string | undefined = 'Signature valid: the payment is authorised. Pass orderRef/expectedAmount so the order can be checked for capture.';
     if (input.orderRef || input.expectedAmount !== undefined) {
       const { data: order } = await this.call<RzpOrder>('GET', `/orders/${encodeURIComponent(orderId)}`, 'fetch_order', undefined, true);
       if (input.orderRef && order.receipt !== input.orderRef) {
@@ -271,15 +282,26 @@ class RazorpayGateway implements PaymentGateway {
       if (input.expectedAmount !== undefined && order.amount !== input.expectedAmount) {
         return { valid: false, status: 'unknown', verifiedVia: 'signature', reason: `Amount mismatch: order is ${order.amount}, expected ${input.expectedAmount}`, raw: order };
       }
+      amount = order.amount;
+      if (razorpayOrderFullyPaid(order)) {
+        status = 'captured';
+        reason = undefined;
+      } else {
+        reason =
+          (order.amount_paid ?? 0) > 0
+            ? `Order is only partially paid (amount_paid ${order.amount_paid} of ${order.amount}).`
+            : 'Payment is authorised but not captured yet (order not paid). With auto-capture on this takes seconds: poll getPaymentStatus or wait for the order.paid webhook; with manual capture, capture it in the Dashboard.';
+      }
     }
 
     return {
       valid: true,
-      // A valid signature means the payment was authorised; it is captured once auto-capture runs.
-      status: 'authorized',
+      status,
       orderRef: input.orderRef,
       providerOrderId: orderId,
       providerPaymentId: paymentId,
+      amount,
+      reason,
       verifiedVia: 'signature',
       raw: p,
     };
@@ -308,6 +330,10 @@ class RazorpayGateway implements PaymentGateway {
     let status: PaymentStatus;
     if (best) status = mapRazorpayPaymentStatus(best);
     else status = order.status === 'paid' ? 'captured' : 'created';
+    // A captured payment does not mean the ORDER is paid: with partial payments (partial_payment)
+    // each instalment is captured on its own. Money-collected states need amount_paid >= amount.
+    const partial = (status === 'captured' || status === 'partially_refunded' || status === 'refunded') && !razorpayOrderFullyPaid(order);
+    if (partial) status = 'pending';
 
     return {
       provider: 'razorpay',
@@ -319,7 +345,11 @@ class RazorpayGateway implements PaymentGateway {
       amountRefunded: best?.amount_refunded,
       currency: order.currency,
       method: best?.method,
-      failureReason: best?.status === 'failed' ? best.error_description ?? undefined : undefined,
+      failureReason: partial
+        ? `Order is only partially paid (amount_paid ${order.amount_paid ?? 0} of ${order.amount}).`
+        : best?.status === 'failed'
+          ? best.error_description ?? undefined
+          : undefined,
       raw: { order, payments: items },
     };
   }
@@ -353,11 +383,31 @@ class RazorpayGateway implements PaymentGateway {
     };
   }
 
+  /**
+   * By providerRefundId (rfnd_...), or by providerPaymentId + refundRef: the payment's refunds are
+   * listed and matched on receipt / notes.refund_ref (both set by refund()). The second form is how a
+   * refund that ended in OUTCOME_UNKNOWN, or was rejected as a duplicate, is found again.
+   */
   async getRefundStatus(input: RefundStatusInput): Promise<RefundResult> {
-    if (!input.providerRefundId) {
-      throw new PaymentError('VALIDATION', 'Razorpay refund status needs providerRefundId (rfnd_xxx).', { provider: 'razorpay' });
+    let data: RzpRefund;
+    if (input.providerRefundId) {
+      ({ data } = await this.call<RzpRefund>('GET', `/refunds/${encodeURIComponent(input.providerRefundId)}`, 'fetch_refund', undefined, true));
+    } else if (input.providerPaymentId) {
+      const { data: list } = await this.call<{ items: RzpRefund[] }>(
+        'GET',
+        `/payments/${encodeURIComponent(input.providerPaymentId)}/refunds?count=100`,
+        'list_payment_refunds',
+        undefined,
+        true,
+      );
+      const found = (list.items ?? []).find((r) => r.receipt === input.refundRef || (!Array.isArray(r.notes) && r.notes?.refund_ref === input.refundRef));
+      if (!found) {
+        throw new PaymentError('NOT_FOUND', `No Razorpay refund with receipt ${input.refundRef} on ${input.providerPaymentId}.`, { provider: 'razorpay' });
+      }
+      data = found;
+    } else {
+      throw new PaymentError('VALIDATION', 'Razorpay refund status needs providerRefundId (rfnd_xxx), or providerPaymentId (pay_xxx) to look the refund up by refundRef.', { provider: 'razorpay' });
     }
-    const { data } = await this.call<RzpRefund>('GET', `/refunds/${encodeURIComponent(input.providerRefundId)}`, 'fetch_refund', undefined, true);
     return {
       provider: 'razorpay',
       refundRef: input.refundRef,
@@ -635,5 +685,12 @@ export const razorpay: ProviderModule<RazorpayCredentials> = {
   extractError(data) {
     const e = (data as { error?: { code?: string; description?: string } })?.error;
     return { code: e?.code, message: e?.description };
+  },
+  protectedOptionKeys: {
+    // transfers: Route (settles to a linked account). partial_payment: lets the customer pay less
+    // than the order amount while the signature still verifies.
+    payment: ['transfers', 'partial_payment', 'first_payment_min_amount'],
+    // notes carries subscription_ref (the binding key verifyPayment checks); offer_id/addons/quantity change the price.
+    subscription: ['plan_id', 'total_count', 'customer_notify', 'notes', 'offer_id', 'addons', 'quantity'],
   },
 };

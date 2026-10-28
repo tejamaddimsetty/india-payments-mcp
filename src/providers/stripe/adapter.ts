@@ -352,7 +352,8 @@ class StripeGateway implements PaymentGateway {
     assertMinorUnits(input.amount);
     const currency = (input.currency ?? 'INR').toLowerCase();
     const { flow, ...providerOptions } = input.providerOptions ?? {};
-    const metadata = { order_ref: input.orderRef, ...(input.metadata ?? {}) };
+    // order_ref is the binding key verifyPayment reads: set last so input.metadata cannot override it.
+    const metadata = { ...(input.metadata ?? {}), order_ref: input.orderRef };
     // Indian export rules want a description of what is being sold on every charge.
     const description = input.description ?? input.orderRef;
 
@@ -535,7 +536,11 @@ class StripeGateway implements PaymentGateway {
     if (input.expectedAmount !== undefined && amount !== input.expectedAmount) {
       return { ...base, valid: false, reason: `Amount mismatch: Stripe has ${amount}, expected ${input.expectedAmount}` };
     }
-    if (status !== 'captured' && status !== 'authorized') {
+    if (status === 'authorized') {
+      // requires_capture: the card is only authorised. The authorisation lapses after ~7 days unless captured.
+      return { ...base, valid: true, reason: 'PaymentIntent is authorised but not captured (requires_capture); capture it before fulfilling.' };
+    }
+    if (status !== 'captured') {
       return { ...base, valid: true, reason: `Payment is not complete (status ${status}). Wait for the webhook or poll getPaymentStatus.` };
     }
     return { ...base, valid: true };
@@ -976,7 +981,7 @@ class StripeGateway implements PaymentGateway {
     } else {
       throw new PaymentError('VALIDATION', 'Pass providerPlanId (a Stripe price_... id) or plan to create a Stripe subscription.', { provider: 'stripe' });
     }
-    const metadata = { subscription_ref: input.subscriptionRef, ...(input.metadata ?? {}) };
+    const metadata = { ...(input.metadata ?? {}), subscription_ref: input.subscriptionRef };
     // totalCount is ignored: Stripe subscriptions run until cancelled (use cancel_at via providerOptions.subscription_data).
     const body = deepMerge(
       {
@@ -1088,5 +1093,20 @@ export const stripe: ProviderModule<StripeCredentials> = {
   extractError(data) {
     const e = (data as { error?: { code?: string; type?: string; message?: string; decline_code?: string } })?.error;
     return { code: e?.code ?? e?.decline_code ?? e?.type, message: e?.message };
+  },
+  protectedOptionKeys: {
+    // capture_method: manual capture (authorised-only, lapses). transfer_data / on_behalf_of /
+    // application_fee_amount / transfer_group: Connect routing to another account. metadata: holds the
+    // order_ref binding key (deep-merged, so even a nested key would override it): use input.metadata.
+    // confirm/customer/payment_method/off_session: charge a saved card immediately. discounts: lower the price.
+    payment: [
+      'capture_method', 'transfer_data', 'on_behalf_of', 'application_fee_amount', 'transfer_group', 'metadata',
+      'payment_intent_data', 'success_url', 'cancel_url', 'line_items', 'mode', 'client_reference_id',
+      'confirm', 'customer', 'payment_method', 'off_session', 'discounts',
+    ],
+    subscription: [
+      'success_url', 'cancel_url', 'line_items', 'mode', 'subscription_data', 'client_reference_id', 'metadata',
+      'discounts', 'customer', 'payment_intent_data',
+    ],
   },
 };

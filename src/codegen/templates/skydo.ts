@@ -30,6 +30,8 @@ export interface ExportInvoice {
   description: string;
   status: PaymentStatus;
   fulfilled: boolean;
+  /** Zoho invoice id (Zoho bridge) or skydo:<orderRef> (ledger). Lets a refresh cost one Zoho call. */
+  providerOrderId?: string;
 }
 
 // TODO: replace with your database (an invoices / orders table).
@@ -50,7 +52,8 @@ async function onPaid(inv: ExportInvoice): Promise<void> {
 }
 
 /** Create the invoice (Zoho bridge) or payment instructions (ledger mode) for an order YOU priced. */
-export async function requestPayment(inv: Omit<ExportInvoice, 'status' | 'fulfilled'>) {
+export async function requestPayment(inv: Omit<ExportInvoice, 'status' | 'fulfilled' | 'providerOrderId'>) {
+  const existing = await loadInvoice(inv.orderRef);
   const created = await payments.createPayment('skydo', {
     orderRef: inv.orderRef,
     amount: inv.amount,
@@ -58,7 +61,8 @@ export async function requestPayment(inv: Omit<ExportInvoice, 'status' | 'fulfil
     customer: inv.customer,
     description: inv.description,
   });
-  await saveInvoice({ ...inv, status: created.status, fulfilled: false });
+  // Asking again (e.g. to resend the instructions) must never reset an order that was already fulfilled.
+  await saveInvoice({ ...inv, status: existing?.status ?? created.status, fulfilled: existing?.fulfilled ?? false, providerOrderId: created.providerOrderId });
   // checkout.type is always "manual" for Skydo: instructions for your client (+ the Zoho invoice link).
   if (created.checkout.type !== 'manual') throw new Error('unexpected checkout type');
   return { orderRef: inv.orderRef, instructions: created.checkout.instructions, invoiceUrl: created.checkout.url };
@@ -68,7 +72,7 @@ export async function requestPayment(inv: Omit<ExportInvoice, 'status' | 'fulfil
 export async function refreshStatus(orderRef: string): Promise<PaymentStatus> {
   const inv = await loadInvoice(orderRef);
   if (!inv) throw new PaymentError('NOT_FOUND', \`Unknown invoice \${orderRef}\`);
-  const v = await payments.verifyPayment('skydo', { orderRef, expectedAmount: inv.amount, payload: {} });
+  const v = await payments.verifyPayment('skydo', { orderRef, expectedAmount: inv.amount, providerOrderId: inv.providerOrderId, payload: {} });
   inv.status = v.status;
   if (v.paid && !inv.fulfilled) {
     inv.fulfilled = true;
@@ -81,8 +85,10 @@ export async function refreshStatus(orderRef: string): Promise<PaymentStatus> {
 }
 
 /**
- * Zoho bridge: Skydo has no webhooks, so poll unpaid invoices. Skydo syncs with Zoho about every
- * 10 minutes, so polling every 15 minutes is plenty (Zoho allows 100 requests/minute per org).
+ * Zoho bridge: Skydo has no webhooks, so poll unpaid invoices: one Zoho API call per open invoice.
+ * Zoho Books allows 100 calls/minute and 1,000 (Free) to 10,000 (Premium+) calls/day per organisation.
+ * At the default 15-minute interval each open invoice costs 96 calls/day: raise the interval if you
+ * have many open invoices on a small plan. Skydo itself only syncs about every 10 minutes.
  */
 export async function pollUnpaid(): Promise<void> {
   for (const inv of invoices.values()) {
@@ -306,7 +312,12 @@ function fastifyPlugin(): string {
   return `import type { FastifyInstance } from 'fastify';
 import { PaymentError } from '${SDK_PACKAGE}';
 import { assertAdmin } from './admin.js';
-import { outstanding, recordReceipt, refreshStatus, requestPayment, storedStatus } from './skydo.js';
+import { outstanding, pollUnpaid, recordReceipt, refreshStatus, requestPayment, storedStatus } from './skydo.js';
+
+/** Zoho bridge: call once at startup, e.g. \`if (process.env.ZOHO_REFRESH_TOKEN) startSkydoPolling()\`. */
+export function startSkydoPolling(intervalMs = 15 * 60_000) {
+  return setInterval(() => void pollUnpaid(), intervalMs);
+}
 
 export async function skydoRoutes(app: FastifyInstance) {
   app.setErrorHandler((err, _req, reply) => {
@@ -355,7 +366,7 @@ export function skydoGuide(cap: ProviderCapabilities): string {
     `Its Terms forbid automating the Skydo dashboard. The generated code therefore never calls Skydo. It automates the two`,
     `paths Skydo itself supports, through the \`${SDK_PACKAGE}\` SDK.`,
     ``,
-    `## Option A: Zoho Books bridge (fully automatic, recommended)`,
+    `## Option A: Zoho Books bridge (automatic once Skydo imports the invoice; recommended)`,
     ``,
     `1. In Skydo: profile > **Connect Skydo to Zoho** > Connect Securely. Choose all currencies or international only.`,
     `   Only invoices created **after** connecting are imported.`,

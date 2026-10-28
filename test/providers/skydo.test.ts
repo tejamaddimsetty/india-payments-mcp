@@ -192,6 +192,7 @@ describe('skydo Zoho Books bridge', () => {
     { match: /GET https:\/\/www\.zohoapis\.in\/books\/v3\/invoices\?/, body: { code: 0, message: 'success', invoices: over.existing ?? [] } },
     { match: /GET https:\/\/www\.zohoapis\.in\/books\/v3\/contacts\?/, body: { code: 0, message: 'success', contacts: over.contacts ?? [{ contact_id: '460000000011', contact_name: 'Globex', currency_code: 'USD', status: 'active', email: 'ap@globex.com' }] } },
     { match: /POST https:\/\/www\.zohoapis\.in\/books\/v3\/invoices\/460000000099\/status\/sent\?/, body: { code: 0, message: 'Invoice status has been changed to Sent.' } },
+    { match: /GET https:\/\/www\.zohoapis\.in\/books\/v3\/invoices\/460000000099\?/, body: { code: 0, message: 'success', invoice: (over.existing?.[0] as Record<string, unknown>) ?? invoice(over.created) } },
     { match: /POST https:\/\/www\.zohoapis\.in\/books\/v3\/invoices\?/, status: 201, body: { code: 0, message: 'The invoice has been created.', invoice: invoice(over.created) } },
   ];
 
@@ -378,7 +379,7 @@ describe('skydo round-2 regressions (strict review)', () => {
     expect((await app.getPaymentStatus({ orderRef: 'ord_shared_1' })).status).toBe('captured');
   });
 
-  it('C1: a stale lock left by a crashed process is broken; a live lock is respected', async () => {
+  it('C1: a stale lock left by a crashed process is broken', async () => {
     const file = tempLedger();
     const f = fakeFetch([]);
     writeFileSync(`${file}.lock`, '');
@@ -442,6 +443,7 @@ describe('skydo round-2 regressions (strict review)', () => {
     const { gw, requests } = zohoGateway([
       { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [invoice({ status: 'draft' })] } },
       { match: /status\/sent/, body: { code: 0, message: 'ok' } },
+      { match: '/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ status: 'draft' }) } },
     ]);
     const r = await gw.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } });
     expect(r.status).toBe('created');
@@ -461,6 +463,7 @@ describe('skydo round-2 regressions (strict review)', () => {
       }
       if (url.includes('/contacts?')) return new Response(JSON.stringify({ code: 0, message: 'success', contacts: [{ contact_id: '1', contact_name: 'G', currency_code: 'USD', email: 'ap@globex.com' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
       if (url.includes('/status/void')) return new Response(JSON.stringify({ code: 0, message: 'voided' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (init?.method === 'GET' && url.includes('/invoices/460000000050?')) return new Response(JSON.stringify({ code: 0, message: 'success', invoice: older }), { status: 200, headers: { 'content-type': 'application/json' } });
       return new Response(JSON.stringify({ code: 0, message: 'created', invoice: ours }), { status: 201, headers: { 'content-type': 'application/json' } });
     };
     void f;
@@ -538,7 +541,7 @@ describe('skydo round-2 regressions (strict review)', () => {
     const { gw } = ledgerGateway();
     await expect(gw.createPayment({ orderRef: 'ord_l3_1', amount: 100000, currency: 'dollars' })).rejects.toMatchObject({ code: 'VALIDATION' });
     await gw.createPayment({ orderRef: 'ord_l2_1', amount: 100000, currency: 'USD' });
-    await expect(gw.recordPayment({ orderRef: 'ord_l2_1', receiptId: 'R', amountReceived: 1, receivedAt: 'yesterday' })).rejects.toThrow(/not a date/);
+    await expect(gw.recordPayment({ orderRef: 'ord_l2_1', receiptId: 'R', amountReceived: 1, receivedAt: 'yesterday' })).rejects.toThrow(/not an ISO 8601 date/);
   });
 
   it('L4: a rate-limited token refresh is reported as RATE_LIMITED, not as a revoked token', async () => {
@@ -560,5 +563,126 @@ describe('skydo round-2 regressions (strict review)', () => {
     const text = r.checkout.type === 'manual' ? r.checkout.instructions : '';
     expect(text).toMatch(/equivalent of USD 50/);
     expect(text).toMatch(/18 characters/);
+  });
+});
+
+describe('skydo round-3 regressions', () => {
+  /** A tiny stateful fake of the Zoho invoices API, shared by several gateways (= processes). */
+  function statefulZoho() {
+    let nextId = 460000000100;
+    const invoices: any[] = [];
+    const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
+    const fetch = async (url: string, init?: RequestInit) => {
+      const u = new URL(url);
+      if (url.includes('oauth/v2/token')) return json({ access_token: 't', expires_in: 3600 });
+      if (u.pathname.endsWith('/contacts')) return json({ code: 0, message: 'success', contacts: [{ contact_id: '1', contact_name: 'G', currency_code: 'USD', email: 'ap@globex.com', status: 'active' }] });
+      const m = /\/invoices\/(\d+)(\/status\/(\w+))?$/.exec(u.pathname);
+      if (m) {
+        const inv = invoices.find((i) => i.invoice_id === m[1]);
+        if (m[3]) inv.status = m[3];
+        return json({ code: 0, message: 'success', invoice: inv });
+      }
+      if (init?.method === 'GET') return json({ code: 0, message: 'success', invoices: invoices.filter((i) => i.reference_number === u.searchParams.get('reference_number')), page_context: { has_more_page: false } });
+      const body = JSON.parse(String(init!.body));
+      const inv = invoice({ invoice_id: String(nextId++), reference_number: body.reference_number, status: 'draft' });
+      invoices.push(inv);
+      return json({ code: 0, message: 'created', invoice: inv }, 201);
+    };
+    return { fetch, invoices };
+  }
+
+  it('N1: two processes racing on one orderRef end with exactly ONE live invoice, and both return it', async () => {
+    const z = statefulZoho();
+    // Both pass the "no invoice yet" lookup before either creates: delay creates until both looked.
+    let looked = 0;
+    let release!: () => void;
+    const bothLooked = new Promise<void>((r) => (release = r));
+    const gated = async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST' && new URL(url).pathname.endsWith('/invoices')) await bothLooked;
+      const res = await z.fetch(url, init);
+      if (init?.method === 'GET' && url.includes('reference_number') && ++looked === 2) release();
+      return res;
+    };
+    const mk = () => skydo.create({ ...ZOHO, ledgerFile: tempLedger() }, testContext('skydo', gated));
+    const input = { orderRef: 'ord_race_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } };
+    const [a, b] = await Promise.all([mk().createPayment(input), mk().createPayment(input)]);
+    expect(z.invoices).toHaveLength(2);
+    const live = z.invoices.filter((i) => i.status !== 'void');
+    expect(live).toHaveLength(1);
+    expect(a.providerOrderId).toBe(live[0].invoice_id);
+    expect(b.providerOrderId).toBe(live[0].invoice_id);
+    expect(live[0].status).toBe('sent');
+  });
+
+  it('N6: a partly written-off invoice (bank fees) is pending for review, not failed', async () => {
+    const { gw } = zohoGateway([{ match: '/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ status: 'paid', balance: 0, payment_made: 1190, write_off_amount: 10 }) } }]);
+    const s = await gw.getPaymentStatus({ orderRef: 'ord_skydo_1', providerOrderId: '460000000099' });
+    expect(s.status).toBe('pending');
+    expect(s.failureReason).toMatch(/Received USD 1190 of 1200; 10 was written off/);
+  });
+
+  it('N8: a retry that finds the invoice returns the full record (invoice link, real status)', async () => {
+    const { gw } = zohoGateway([
+      { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [{ ...invoice({ status: 'paid' }), invoice_url: undefined, payment_made: undefined }] } },
+      { match: '/invoices/460000000099?', body: { code: 0, message: 'success', invoice: invoice({ status: 'paid', payment_made: 1200, balance: 0 }) } },
+    ]);
+    const r = await gw.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', customer: { email: 'ap@globex.com' } });
+    expect(r.status).toBe('captured');
+    expect(r.checkout).toMatchObject({ url: 'https://books.zoho.in/SecurePayment?CInvoiceID=abc' });
+  });
+
+  it('N9: an explicit zohoCustomerId must be an active customer', async () => {
+    const vendor = zohoGateway([
+      { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [] } },
+      { match: '/contacts/77?', body: { code: 0, message: 'success', contact: { contact_id: '77', contact_name: 'Supplier', contact_type: 'vendor', currency_code: 'USD' } } },
+    ]).gw;
+    await expect(vendor.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', providerOptions: { zohoCustomerId: '77' } })).rejects.toThrow(/not a customer/);
+    const inactive = zohoGateway([
+      { match: /GET .*\/invoices\?/, body: { code: 0, message: 'success', invoices: [] } },
+      { match: '/contacts/78?', body: { code: 0, message: 'success', contact: { contact_id: '78', contact_name: 'Old', contact_type: 'customer', status: 'inactive', currency_code: 'USD' } } },
+    ]).gw;
+    await expect(inactive.createPayment({ orderRef: 'ord_skydo_1', amount: 120000, currency: 'USD', providerOptions: { zohoCustomerId: '78' } })).rejects.toThrow(/inactive/);
+  });
+
+  it('N16: receivedAt must be an ISO date and not in the future', async () => {
+    const { gw } = ledgerGateway();
+    await gw.createPayment({ orderRef: 'ord_n16', amount: 100000, currency: 'USD' });
+    await expect(gw.recordPayment({ orderRef: 'ord_n16', receiptId: 'R', amountReceived: 1, receivedAt: '1' })).rejects.toThrow(/ISO 8601/);
+    await expect(gw.recordPayment({ orderRef: 'ord_n16', receiptId: 'R', amountReceived: 1, receivedAt: '2099-01-01' })).rejects.toThrow(/future/);
+    await expect(gw.recordPayment({ orderRef: 'ord_n16', receiptId: 'R', amountReceived: 1, receivedAt: '2026-10-27' })).resolves.toMatchObject({ status: 'pending' });
+  });
+
+  it('N18: receipt ids are case-insensitive and one receipt cannot pay two orders', async () => {
+    const { gw } = ledgerGateway();
+    await gw.createPayment({ orderRef: 'ord_n18_a', amount: 100000, currency: 'USD' });
+    await gw.createPayment({ orderRef: 'ord_n18_b', amount: 100000, currency: 'USD' });
+    await gw.recordPayment({ orderRef: 'ord_n18_a', receiptId: 'sky-tx-1', amountReceived: 50000 });
+    expect((await gw.recordPayment({ orderRef: 'ord_n18_a', receiptId: ' SKY-TX-1 ', amountReceived: 50000 })).status).toBe('pending');
+    await expect(gw.recordPayment({ orderRef: 'ord_n18_b', receiptId: 'SKY-TX-1', amountReceived: 50000 })).rejects.toThrow(/already recorded on order ord_n18_a/);
+  });
+
+  it('N13: waiting for the ledger lock does not freeze the event loop', async () => {
+    const file = tempLedger();
+    const f = fakeFetch([]);
+    const gw = skydo.create({ receivingAccounts: ACCOUNTS, ledgerFile: file }, testContext('skydo', f.fetch));
+    writeFileSync(`${file}.lock`, 'someone-else'); // a fresh (not stale) lock held by another process
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 10);
+    const pending = gw.createPayment({ orderRef: 'ord_n13', amount: 100000, currency: 'USD' });
+    await new Promise((r) => setTimeout(r, 200));
+    clearInterval(timer);
+    expect(ticks).toBeGreaterThan(5);
+    const { unlinkSync } = await import('node:fs');
+    unlinkSync(`${file}.lock`);
+    await expect(pending).resolves.toMatchObject({ status: 'created' });
+  });
+
+  it('N14: a process never deletes a lock it does not own', async () => {
+    const file = tempLedger();
+    const f = fakeFetch([]);
+    const gw = skydo.create({ receivingAccounts: ACCOUNTS, ledgerFile: file }, testContext('skydo', f.fetch));
+    await gw.createPayment({ orderRef: 'ord_n14', amount: 100000, currency: 'USD' });
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(`${file}.lock`)).toBe(false); // released after use
   });
 });

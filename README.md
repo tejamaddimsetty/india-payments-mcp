@@ -117,6 +117,8 @@ That is 19 tools. The server also exposes resources (`payments://matrix`, `payme
 npm install india-payments-mcp
 ```
 
+The package is ESM-only: use `import` (or `require()` on Node 22.12+, which loads ES modules); Node 20 CommonJS code needs `await import('india-payments-mcp')`.
+
 ```ts
 import express from 'express';
 import { PaymentsClient, createWebhookHandler, PaymentError } from 'india-payments-mcp';
@@ -139,7 +141,7 @@ app.post('/api/orders', express.json(), async (req, res) => {
 
 // 2. Verify what the browser sends back, bound to YOUR stored order and amount.
 //    Fulfil only when paid === true. paid is true only when the callback is genuine, the payment is
-//    settled, AND you passed orderRef + expectedAmount (valid alone means "genuine": a genuine failure
+//    captured (not just authorised, not fully refunded), AND you passed orderRef + expectedAmount (valid alone means "genuine": a genuine failure
 //    is valid too). For Razorpay also pass the order_... id you stored as providerOrderId.
 app.post('/api/payments/verify', express.json(), async (req, res) => {
   const result = await payments.verifyPayment('razorpay', {
@@ -227,7 +229,7 @@ Set the mode with `PAYMENTS_MODE`. Adapters cross-check key prefixes where the g
 - **Refunds are idempotent by `refund_ref`.** The same `refund_ref` with the same request returns the stored result. The same `refund_ref` with a different request fails with `IDEMPOTENCY_CONFLICT`.
 - **Order creation is idempotent by `idempotency_key`** (default: `order_ref`).
 - **Money-moving POSTs are never retried blindly.** Only GETs and requests the gateway de-duplicates are retried. When a non-retry-safe request times out or gets a 5xx, the error is `OUTCOME_UNKNOWN`: it may or may not have happened, so look the payment or refund up before retrying.
-- **Verification binds to your order.** `paid` is `true` only when the callback is genuine, the payment is settled (`captured`, `authorized`, `refunded` or `partially_refunded`) **and** you passed both `order_ref` and `expected_amount`. A valid signature for a different order or amount is rejected. For Razorpay, pass the `order_…` id you stored as `provider_order_id`.
+- **Verification binds to your order.** `paid` is `true` only when the callback is genuine, the money is collected (`captured` or `partially_refunded`; `authorized`-only and fully `refunded` payments are not paid) **and** you passed both `order_ref` and `expected_amount`. A valid signature for a different order or amount is rejected. For Razorpay, pass the `order_…` id you stored as `provider_order_id`.
 - **`provider_options` cannot override core fields.** Keys that carry the amount, currency, order id, credentials, hashes or redirect URLs on any gateway (for example `amount`, `key`, `hash`, `surl`, `order_id`, `merchantUrls`, `success_url`, `line_items`) are rejected with `VALIDATION`.
 - **Secrets never leave the server.** `check_config` reports env var *names* only. Logs (stderr, JSON) and the audit log redact secret-looking keys. Checkout options contain only publishable values.
 - **Audit trail.** Set `PAYMENTS_AUDIT_LOG` to append every create, refund, subscription and Skydo receipt action, including blocked ones, as JSON Lines.

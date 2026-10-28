@@ -449,6 +449,8 @@ class CcavenueGateway implements PaymentGateway {
         providerCode: r.error_code,
         providerMessage: r.reason,
         raw: res,
+        // CCAvenue has no refund-status lookup and rejects a reused refund_ref_no.
+        hint: 'If this refundRef was used before (for example after an OUTCOME_UNKNOWN), the earlier refund may exist: check the order in the CCAvenue dashboard (or getPaymentStatus raw refund fields) before retrying with a new refundRef.',
       });
     }
     return {
@@ -581,5 +583,9 @@ export const ccavenue: ProviderModule<CcavenueCredentials> = {
     }
     const d = data as { error_desc?: string; error_code?: string; reason?: string } | undefined;
     return { code: d?.error_code, message: d?.error_desc ?? d?.reason };
+  },
+  protectedOptionKeys: {
+    // sub_account_id routes the settlement to a sub-account.
+    payment: ['merchant_id', 'access_code', 'order_id', 'amount', 'currency', 'redirect_url', 'cancel_url', 'sub_account_id', 'tid'],
   },
 };

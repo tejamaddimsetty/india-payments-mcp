@@ -76,4 +76,14 @@ export interface ProviderModule<C = Record<string, string | undefined>> {
   create(credentials: C, ctx: AdapterContext): PaymentGateway;
   /** Pull the provider's error code/message out of a non-2xx response body. Used by the shared HTTP client. */
   extractError?(data: unknown, status: number): { code?: string; message?: string };
+  /**
+   * Top-level `providerOptions` keys this gateway refuses, per operation: fields that carry the
+   * amount, the binding keys (order/subscription refs), redirect/notification URLs, or that route
+   * money elsewhere (splits, transfers, connected accounts, manual capture). PaymentsClient checks
+   * them, on top of a baseline list shared by every gateway, before any network call.
+   */
+  protectedOptionKeys?: {
+    payment?: readonly string[];
+    subscription?: readonly string[];
+  };
 }

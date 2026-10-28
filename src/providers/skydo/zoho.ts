@@ -41,6 +41,7 @@ export interface ZohoContact {
   currency_code?: string;
   email?: string;
   status?: string;
+  contact_type?: string;
 }
 
 /** Fields of the invoice response that the bridge reads (invoices.yml `invoice-response`). */

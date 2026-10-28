@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { ProviderCapabilities } from '../core/capabilities.js';
 import { getHeader, hmacSha256Hex, safeEqual } from '../core/crypto.js';
-import { PaymentError } from '../core/errors.js';
+import { notImplemented, PaymentError, unsupported } from '../core/errors.js';
 import type { AdapterContext, PaymentGateway } from '../core/gateway.js';
 import type {
   CancelSubscriptionInput,
@@ -60,6 +60,21 @@ interface MockRefund {
   status: 'processed';
 }
 
+/**
+ * Where the mock mirrors a real adapter's input rules, so code that passes in mock mode does not fail in
+ * sandbox. Kept next to the mock (the real checks live inside each adapter).
+ */
+/** Real adapters that accept INR only (PayU hosted checkout, Paytm, PhonePe). */
+const INR_ONLY: ReadonlySet<ProviderId> = new Set(['payu', 'paytm', 'phonepe']);
+/** Real status lookup needs providerOrderId (Razorpay order_..., Stripe cs_/pi_...). */
+const STATUS_NEEDS_PROVIDER_ORDER_ID: ReadonlySet<ProviderId> = new Set(['razorpay', 'stripe']);
+/** Real refund needs providerPaymentId. */
+const REFUND_NEEDS_PROVIDER_PAYMENT_ID: ReadonlySet<ProviderId> = new Set(['razorpay', 'stripe', 'payu', 'paytm', 'ccavenue']);
+/** Real gateway rejects a reused refund reference instead of returning the earlier refund. */
+const REFUND_DUPLICATE_REJECTED: ReadonlySet<ProviderId> = new Set(['razorpay', 'payu', 'ccavenue']);
+/** Real verifyPayment is a server-side status lookup (unsigned redirect), not a signed callback. */
+const VERIFY_BY_STATUS_LOOKUP: ReadonlySet<ProviderId> = new Set(['skydo', 'cashfree', 'phonepe', 'stripe']);
+
 /** Shared across all mock gateways in a process so the MCP server keeps state between tool calls. */
 export class MockLedger {
   readonly payments = new Map<string, MockPayment>();
@@ -100,6 +115,10 @@ export class MockGateway implements PaymentGateway {
   }
 
   async createPayment(input: CreatePaymentInput): Promise<CreatePaymentResult> {
+    const currency = (input.currency ?? 'INR').toUpperCase();
+    if (INR_ONLY.has(this.id) && currency !== 'INR') {
+      throw new PaymentError('VALIDATION', `Mock ${this.id}: the real ${this.id} adapter accepts INR only (got ${currency}).`, { provider: this.id });
+    }
     if (this.ledger.payments.has(this.key(input.orderRef))) {
       throw new PaymentError('PROVIDER_ERROR', `Mock ${this.id}: orderRef "${input.orderRef}" already used. Gateways require a unique order id per attempt.`, { provider: this.id });
     }
@@ -107,7 +126,7 @@ export class MockGateway implements PaymentGateway {
       orderRef: input.orderRef,
       providerOrderId: `mock_${this.id}_order_${randomUUID().slice(0, 8)}`,
       amount: input.amount,
-      currency: input.currency ?? 'INR',
+      currency,
       status: 'created',
       refunded: 0,
       createdAt: this.ctx.now().toISOString(),
@@ -155,6 +174,7 @@ export class MockGateway implements PaymentGateway {
 
   async verifyPayment(input: VerifyPaymentInput): Promise<VerifyPaymentResult> {
     const payload = input.payload;
+    if (payload.mock_signature === undefined && VERIFY_BY_STATUS_LOOKUP.has(this.id)) return this.verifyByLookup(input);
     if (!safeEqual(mockSignature(payload), payload.mock_signature)) {
       return { valid: false, status: 'unknown', reason: 'Mock signature mismatch', verifiedVia: 'signature', raw: payload };
     }
@@ -176,8 +196,39 @@ export class MockGateway implements PaymentGateway {
     };
   }
 
+  /** Mirrors gateways whose real verify is a status lookup keyed by the caller's orderRef. */
+  private verifyByLookup(input: VerifyPaymentInput): VerifyPaymentResult {
+    const payloadRef = input.payload.order_ref ?? input.payload.order_id;
+    if (payloadRef && input.orderRef && payloadRef !== input.orderRef) {
+      return { valid: false, status: 'unknown', reason: `Callback is for order ${payloadRef}, expected ${input.orderRef}`, verifiedVia: 'status_api', raw: input.payload };
+    }
+    const orderRef = input.orderRef ?? payloadRef;
+    const p = orderRef ? this.ledger.payments.get(this.key(orderRef)) : undefined;
+    if (!p) {
+      return { valid: false, status: 'unknown', reason: orderRef ? `Mock ${this.id}: no payment with orderRef "${orderRef}".` : 'No orderRef to look up.', verifiedVia: 'status_api', raw: input.payload };
+    }
+    const amountOk = input.expectedAmount === undefined || p.amount === input.expectedAmount;
+    return {
+      valid: amountOk,
+      status: p.status,
+      orderRef: p.orderRef,
+      providerOrderId: p.providerOrderId,
+      providerPaymentId: p.providerPaymentId,
+      amount: p.amount,
+      ...(amountOk ? {} : { reason: `Amount mismatch: order is ${p.amount}, expected ${input.expectedAmount}` }),
+      verifiedVia: 'status_api',
+      raw: { mock: true, ...p },
+    };
+  }
+
   async getPaymentStatus(input: PaymentStatusInput): Promise<PaymentStatusResult> {
+    if (STATUS_NEEDS_PROVIDER_ORDER_ID.has(this.id) && !input.providerOrderId) {
+      throw new PaymentError('VALIDATION', `Mock ${this.id}: status lookup needs providerOrderId (returned by createPayment), as on the real gateway.`, { provider: this.id });
+    }
     const p = this.find(input.orderRef);
+    if (input.providerOrderId && input.providerOrderId !== p.providerOrderId) {
+      throw new PaymentError('NOT_FOUND', `Mock ${this.id}: providerOrderId ${input.providerOrderId} does not belong to orderRef "${input.orderRef}".`, { provider: this.id });
+    }
     return {
       provider: this.id,
       orderRef: p.orderRef,
@@ -194,11 +245,23 @@ export class MockGateway implements PaymentGateway {
   }
 
   async refund(input: RefundInput): Promise<RefundResult> {
+    if (REFUND_NEEDS_PROVIDER_PAYMENT_ID.has(this.id) && !input.providerPaymentId) {
+      throw new PaymentError('VALIDATION', `Mock ${this.id}: refunds need providerPaymentId (from getPaymentStatus or the callback), as on the real gateway.`, { provider: this.id });
+    }
     const existing = this.ledger.refunds.get(`${this.id}:${input.refundRef}`);
+    if (existing && REFUND_DUPLICATE_REJECTED.has(this.id)) {
+      throw new PaymentError('PROVIDER_ERROR', `Mock ${this.id}: duplicate refund reference "${input.refundRef}".`, {
+        provider: this.id,
+        providerMessage: 'Duplicate refund reference: a refund with this reference already exists.',
+      });
+    }
     if (existing) {
       return { provider: this.id, refundRef: existing.refundRef, providerRefundId: existing.providerRefundId, status: existing.status, amount: existing.amount, raw: { mock: true, deduplicated: true } };
     }
     const p = this.find(input.orderRef);
+    if (input.providerPaymentId && input.providerPaymentId !== p.providerPaymentId) {
+      throw new PaymentError('NOT_FOUND', `Mock ${this.id}: providerPaymentId ${input.providerPaymentId} does not belong to orderRef "${input.orderRef}".`, { provider: this.id });
+    }
     if (p.status !== 'captured' && p.status !== 'partially_refunded') {
       throw new PaymentError('PROVIDER_ERROR', `Mock ${this.id}: cannot refund a payment in status ${p.status}.`, { provider: this.id });
     }
@@ -228,6 +291,13 @@ export class MockGateway implements PaymentGateway {
   }
 
   async simulateWebhook(input: SimulateWebhookInput): Promise<SimulatedWebhook> {
+    // Same refusals as the real adapters.
+    if (input.type === 'refund.processed' && this.id === 'payu') {
+      throw notImplemented('payu', 'refund webhook simulation (refund webhooks are not parsed by this adapter)');
+    }
+    if (input.type === 'refund.processed' && this.id === 'ccavenue') {
+      throw unsupported('ccavenue', 'refund webhook simulation', 'CCAvenue sends no refund webhooks; poll the order status instead.');
+    }
     const p = this.ledger.payments.get(this.key(input.orderRef));
     const event: NormalizedWebhookEvent = {
       provider: this.id,
@@ -238,7 +308,8 @@ export class MockGateway implements PaymentGateway {
       providerOrderId: p?.providerOrderId,
       providerPaymentId: input.providerPaymentId ?? p?.providerPaymentId,
       refundRef: input.refundRef,
-      status: input.type === 'payment.succeeded' ? 'captured' : input.type === 'payment.failed' ? 'failed' : 'refunded',
+      // Refund events leave the payment status undefined (see NormalizedWebhookEvent.status).
+      status: input.type === 'payment.succeeded' ? 'captured' : input.type === 'payment.failed' ? 'failed' : undefined,
       amount: input.amount,
       currency: input.currency ?? 'INR',
       occurredAt: this.ctx.now().toISOString(),
@@ -273,14 +344,19 @@ export class MockGateway implements PaymentGateway {
   }
 
   async listSettlements(_input: ListSettlementsInput): Promise<ListSettlementsResult> {
-    const captured = [...this.ledger.payments.values()].filter((p) => p.status === 'captured');
-    const gross = captured.reduce((s, p) => s + p.amount, 0);
-    const fees = Math.round(gross * 0.02);
+    // Only this provider's captured payments, one settlement per currency (the ledger is shared).
+    const prefix = `${this.id}:`;
+    const gross = new Map<string, number>();
+    for (const [key, p] of this.ledger.payments) {
+      if (!key.startsWith(prefix) || p.status !== 'captured') continue;
+      gross.set(p.currency, (gross.get(p.currency) ?? 0) + p.amount);
+    }
     return {
       provider: this.id,
-      items: gross
-        ? [{ id: `mock_setl_${randomUUID().slice(0, 8)}`, amount: gross - fees, currency: 'INR', status: 'processed', utr: 'MOCKUTR000001', settledAt: this.ctx.now().toISOString(), fees }]
-        : [],
+      items: [...gross].map(([currency, amount], i) => {
+        const fees = Math.round(amount * 0.02);
+        return { id: `mock_setl_${randomUUID().slice(0, 8)}`, amount: amount - fees, currency, status: 'processed', utr: `MOCKUTR${String(i + 1).padStart(6, '0')}`, settledAt: this.ctx.now().toISOString(), fees };
+      }),
       raw: { mock: true },
     };
   }

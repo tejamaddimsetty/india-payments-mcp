@@ -18,7 +18,7 @@ export const skydoCapabilities: ProviderCapabilities = {
     ),
     verifyPayment: featureRow('partial', 'No callback exists. Zoho bridge: reads the Zoho invoice Skydo marks paid (verifiedVia status_api). Ledger mode: reads the receipt you recorded (verifiedVia manual_record).'),
     paymentStatus: featureRow('partial', 'Zoho bridge: Zoho invoice status (paid/partially_paid/sent/overdue/void) plus whether Skydo attached the FIRA. Ledger mode: the local ledger.'),
-    refund: featureRow('unsupported', `${NO_API} Skydo's FAQ says it cannot initiate a refund directly once a payment is settled; returning money is arranged outside Skydo.`),
+    refund: featureRow('unsupported', `${NO_API} Skydo's FAQ says it cannot initiate a refund directly for settled InstaLink payments; for anything else ask Skydo support.`),
     refundStatus: featureRow('unsupported', NO_API),
     webhooks: featureRow('unsupported', `${NO_API} Skydo notifies you by email/WhatsApp; poll payments_get_status (Zoho bridge) or record receipts (ledger mode).`),
     customers: featureRow('unsupported', 'Zoho bridge uses your existing Zoho Books customers (matched by email or zohoCustomerId).'),

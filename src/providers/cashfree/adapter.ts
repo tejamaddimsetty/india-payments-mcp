@@ -341,7 +341,8 @@ class CashfreeGateway implements PaymentGateway {
     }
     // `valid` means "this callback is genuinely about this order". An abandoned or failed checkout
     // also lands on return_url, so callers must read `status` (or PaymentsClient's `paid`).
-    const paid = s.status === 'captured' || s.status === 'refunded' || s.status === 'partially_refunded';
+    // A fully refunded order is not paid any more (a replayed return URL must not re-fulfil it).
+    const paid = s.status === 'captured' || s.status === 'partially_refunded';
     return {
       ...base,
       valid: true,
@@ -373,6 +374,20 @@ class CashfreeGateway implements PaymentGateway {
     else if (best) status = mapCashfreePaymentStatus(best.payment_status);
     else status = mapCashfreeOrderStatus(order.order_status);
 
+    const amount = fromMajor(order.order_amount, order.order_currency);
+    // A refunded order stays PAID on Cashfree. "Get All Refunds for an Order"
+    // (GET /orders/{order_id}/refunds, x-api-version 2026-01-01) tells us how much went back.
+    let amountRefunded: number | undefined;
+    let refunds: CfRefund[] | undefined;
+    if (status === 'captured') {
+      const { data } = await this.call<CfRefund[]>('GET', `${path}/refunds`, 'fetch_order_refunds', { retrySafe: true });
+      refunds = Array.isArray(data) ? data : [];
+      amountRefunded = refunds
+        .filter((r) => r.refund_status === 'SUCCESS')
+        .reduce((sum, r) => sum + fromMajor(r.refund_amount, r.refund_currency ?? order.order_currency), 0);
+      if (amountRefunded > 0) status = amountRefunded >= amount ? 'refunded' : 'partially_refunded';
+    }
+
     const failed = best && best.payment_status !== 'SUCCESS' && status !== 'pending';
     return {
       provider: 'cashfree',
@@ -380,11 +395,12 @@ class CashfreeGateway implements PaymentGateway {
       providerOrderId: String(order.cf_order_id),
       providerPaymentId: best ? String(best.cf_payment_id) : undefined,
       status,
-      amount: fromMajor(order.order_amount, order.order_currency),
+      amount,
+      amountRefunded,
       currency: order.order_currency,
       method: mapMethod(best?.payment_group),
       failureReason: failed ? best.error_details?.error_description ?? best.payment_message ?? undefined : undefined,
-      raw: { order, payments: items },
+      raw: { order, payments: items, ...(refunds ? { refunds } : {}) },
     };
   }
 
@@ -622,5 +638,9 @@ export const cashfree: ProviderModule<CashfreeCredentials> = {
     const e = data as { code?: string; type?: string; message?: string } | undefined;
     if (!e || typeof e !== 'object') return {};
     return { code: e.code ?? e.type, message: e.message };
+  },
+  protectedOptionKeys: {
+    // order_meta: return_url / notify_url (redirects the customer and the webhooks). order_splits: Easy Split to vendors.
+    payment: ['order_meta', 'order_splits'],
   },
 };

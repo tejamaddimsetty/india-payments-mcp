@@ -9,8 +9,10 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
     "india-payments-mcp": "./dist/cli.js"
@@ -24,7 +26,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "doctor": "tsx src/cli.ts doctor",
@@ -32,7 +35,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "inspect": "npx @modelcontextprotocol/inspector tsx src/cli.ts",
-    "sandbox:smoke": "tsx scripts/sandbox-smoke.ts"
+    "sandbox:smoke": "tsx scripts/sandbox-smoke.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "mcp",
@@ -54,6 +58,10 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/tejamaddimsetty/india-payments-mcp.git"
+  },
+  "homepage": "https://github.com/tejamaddimsetty/india-payments-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/tejamaddimsetty/india-payments-mcp/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

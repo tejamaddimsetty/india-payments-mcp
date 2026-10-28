@@ -47,4 +47,26 @@ describe('MCP server', () => {
     const res = await client.readResource({ uri: 'payments://matrix' });
     expect(String((res.contents[0] as any).text)).toContain('Razorpay');
   });
+
+  it('payments_get_status takes provider_payment_id; refund descriptions name the ids each gateway needs', async () => {
+    const client = await connect();
+    const { tools } = await client.listTools();
+    const status = tools.find((t) => t.name === 'payments_get_status')!;
+    expect(Object.keys((status.inputSchema as { properties: object }).properties)).toContain('provider_payment_id');
+    expect(tools.find((t) => t.name === 'payments_get_refund_status')!.description).toMatch(/PayU: provider_refund_id/);
+    const refund = tools.find((t) => t.name === 'payments_refund')!.description!;
+    expect(refund).toContain('within this server process');
+    expect(tools.find((t) => t.name === 'payments_verify_payment')!.description).toMatch(/authorized.*NOT paid/);
+  });
+
+  it('payments_check_config reports an unconfigured Skydo as not configured with setup help, not an error', async () => {
+    const server = createMcpServer(new PaymentsClient({ env: { PAYMENTS_MODE: 'sandbox' } }));
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0' });
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const r = json(await client.callTool({ name: 'payments_check_config', arguments: { provider: 'skydo' } }));
+    expect(r.providers[0]).toMatchObject({ ready: false });
+    expect(r.providers[0].initError).toBeUndefined();
+    expect(r.providers[0].setup).toMatch(/SKYDO_RECEIVING_ACCOUNTS/);
+  });
 });

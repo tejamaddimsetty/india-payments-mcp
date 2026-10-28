@@ -14,7 +14,7 @@ import type {
 } from '../../core/types.js';
 import { accountFor, parseReceivingAccounts, paymentInstructions, type ReceivingAccount } from './accounts.js';
 import { skydoCapabilities } from './capabilities.js';
-import { SkydoLedger, type LedgerEntry } from './ledger.js';
+import { normalizeReceiptId, SkydoLedger, type LedgerEntry } from './ledger.js';
 import { ZohoBooks, type ZohoInvoice } from './zoho.js';
 
 /**
@@ -86,12 +86,25 @@ export function zohoInvoiceOutcome(inv: ZohoInvoice): { status: PaymentStatus; r
     return { status: base, reason: inv.status === 'partially_paid' ? `Partially paid: balance ${inv.currency_code} ${inv.balance}` : undefined };
   }
   const writeOff = Number(inv.write_off_amount ?? 0);
-  if (writeOff > 0) return { status: 'failed', reason: `Zoho shows "paid" because ${inv.currency_code} ${writeOff} was written off as bad debt; no money was received for it.` };
+  const paidAmount = Number(inv.payment_made ?? 0);
+  if (writeOff > 0) {
+    // Written off entirely: no money. Partly written off (e.g. bank fees abroad deducted, remainder
+    // written off): money arrived but less than invoiced, so a human decides; same as a short receipt.
+    return paidAmount > 0
+      ? { status: 'pending', reason: `Received ${inv.currency_code} ${paidAmount} of ${inv.total}; ${writeOff} was written off. Review and fulfil manually if acceptable.` }
+      : { status: 'failed', reason: `Zoho shows "paid" because ${inv.currency_code} ${writeOff} was written off as bad debt; no money was received for it.` };
+  }
   if (inv.payment_made === undefined) return { status: 'unknown', reason: 'Zoho did not return payment_made; cannot confirm money was received.' };
   if (Number(inv.payment_made) + 1e-9 < Number(inv.total)) {
     return { status: 'unknown', reason: `Zoho shows "paid" but payments cover only ${inv.payment_made} of ${inv.total} (the rest was closed with credits).` };
   }
   return { status: 'captured' };
+}
+
+/** Deterministic: oldest invoice wins. Zoho ids are numeric strings, so compare them as numbers. */
+function pickWinner(invoices: ZohoInvoice[]): ZohoInvoice {
+  const key = (i: ZohoInvoice) => i.invoice_id.padStart(32, '0');
+  return [...invoices].sort((a, b) => key(a).localeCompare(key(b)))[0]!;
 }
 
 export interface RecordPaymentInput {
@@ -188,7 +201,9 @@ export class SkydoGateway implements PaymentGateway {
   private async createZohoInvoice(input: CreatePaymentInput, currency: string, instructions: string | undefined, notes: string[]): Promise<CreatePaymentResult> {
     const zoho = this.zoho!;
     // Zoho invoice creation is not idempotent, so look for our reference first.
-    let invoice = await zoho.findInvoiceByReference(input.orderRef);
+    const found = await zoho.findInvoiceByReference(input.orderRef);
+    // The list endpoint omits invoice_url, payment_made and write_off_amount: read the full record.
+    let invoice = found && found.status !== 'void' ? await zoho.getInvoice(found.invoice_id) : found;
     if (invoice && invoice.status !== 'void') {
       if (invoice.currency_code.toUpperCase() !== currency || fromMajor(invoice.total, currency) !== input.amount) {
         throw new PaymentError('VALIDATION', `Zoho invoice ${invoice.invoice_number} already uses reference ${input.orderRef} with a different amount or currency.`, { provider: 'skydo' });
@@ -215,11 +230,15 @@ export class SkydoGateway implements PaymentGateway {
         ...(typeof opts.dueDate === 'string' ? { due_date: opts.dueDate } : {}),
       };
       invoice = await zoho.createInvoice(body, opts.sendEmail === true);
-      // Two processes can race past the lookup: keep the oldest invoice for this reference, void ours.
-      const twins = (await zoho.findInvoicesByReference(input.orderRef)).filter((i) => i.status !== 'void' && i.invoice_id !== invoice!.invoice_id);
-      if (twins.length > 0) {
+      // Two processes can race past the lookup and both create an invoice. Every racer computes the
+      // SAME winner (oldest by Zoho's numeric invoice_id, which increases with creation), so exactly
+      // one survives: each process voids only its own invoice, and only if it is not the winner.
+      const live = (await zoho.findInvoicesByReference(input.orderRef)).filter((i) => i.status !== 'void');
+      if (!live.some((i) => i.invoice_id === invoice!.invoice_id)) live.push(invoice);
+      const winner = pickWinner(live);
+      if (winner.invoice_id !== invoice.invoice_id) {
         await zoho.markVoid(invoice.invoice_id);
-        invoice = twins.sort((a, b) => (a.created_time ?? a.invoice_id).localeCompare(b.created_time ?? b.invoice_id))[0]!;
+        invoice = await zoho.getInvoice(winner.invoice_id);
       }
     }
     // Skydo imports invoices as outstanding receivables; a draft is not one yet. Also repairs a
@@ -254,12 +273,18 @@ export class SkydoGateway implements PaymentGateway {
   private async resolveCustomer(input: CreatePaymentInput, currency: string): Promise<string> {
     const zoho = this.zoho!;
     const explicit = input.providerOptions?.zohoCustomerId;
-    const contact =
-      typeof explicit === 'string'
-        ? await zoho.getContact(explicit)
-        : input.customer?.email
-          ? await zoho.findCustomerByEmail(input.customer.email)
-          : undefined;
+    let contact;
+    if (typeof explicit === 'string') {
+      contact = await zoho.getContact(explicit);
+      if (contact.contact_type && contact.contact_type !== 'customer') {
+        throw new PaymentError('VALIDATION', `Zoho contact ${explicit} is a ${contact.contact_type}, not a customer.`, { provider: 'skydo' });
+      }
+      if (contact.status === 'inactive') {
+        throw new PaymentError('VALIDATION', `Zoho customer ${contact.contact_name} is inactive.`, { provider: 'skydo', hint: 'Mark the customer active in Zoho Books.' });
+      }
+    } else if (input.customer?.email) {
+      contact = await zoho.findCustomerByEmail(input.customer.email);
+    }
     if (!contact) {
       throw new PaymentError(
         'VALIDATION',
@@ -282,7 +307,7 @@ export class SkydoGateway implements PaymentGateway {
       throw new PaymentError('CONFIG_MISSING', `No Skydo receiving account for ${currency} and no "*" fallback in SKYDO_RECEIVING_ACCOUNTS.`, { provider: 'skydo' });
     }
     const now = this.ctx.now().toISOString();
-    const entry = this.ledger().update(input.orderRef, (existing) => {
+    const entry = (await this.ledger().update(input.orderRef, (existing) => {
       if (existing) {
         if (existing.amount !== input.amount || existing.currency !== currency) {
           throw new PaymentError('VALIDATION', `orderRef ${input.orderRef} is already tracked with a different amount or currency.`, { provider: 'skydo' });
@@ -301,7 +326,7 @@ export class SkydoGateway implements PaymentGateway {
         description: input.description,
         receipts: [],
       };
-    })!;
+    }))!;
     return {
       provider: 'skydo',
       environment: this.environment,
@@ -402,14 +427,27 @@ export class SkydoGateway implements PaymentGateway {
     if (!receiptId || receiptId.length > 100) {
       throw new PaymentError('VALIDATION', 'receiptId is required (the Skydo transaction reference or FIRA number, max 100 chars) so a receipt is never counted twice.', { provider: 'skydo' });
     }
-    if (input.receivedAt !== undefined && Number.isNaN(Date.parse(input.receivedAt))) {
-      throw new PaymentError('VALIDATION', `receivedAt "${input.receivedAt}" is not a date (use ISO 8601, e.g. 2026-10-29 or 2026-10-29T10:00:00Z).`, { provider: 'skydo' });
+    if (input.receivedAt !== undefined) {
+      const t = Date.parse(input.receivedAt);
+      if (!/^\d{4}-\d{2}-\d{2}/.test(input.receivedAt) || Number.isNaN(t)) {
+        throw new PaymentError('VALIDATION', `receivedAt "${input.receivedAt}" is not an ISO 8601 date (e.g. 2026-10-29 or 2026-10-29T10:00:00Z).`, { provider: 'skydo' });
+      }
+      if (t > this.ctx.now().getTime() + 24 * 3600_000) {
+        throw new PaymentError('VALIDATION', `receivedAt ${input.receivedAt} is in the future.`, { provider: 'skydo' });
+      }
     }
+    const key = normalizeReceiptId(receiptId);
     const now = this.ctx.now().toISOString();
-    const entry = this.ledger().update(input.orderRef, (e) => {
+    const entry = (await this.ledger().update(input.orderRef, (e, all) => {
       if (!e) throw new PaymentError('NOT_FOUND', `Skydo ledger has no order ${input.orderRef}.`, { provider: 'skydo' });
       if (e.status === 'cancelled') throw new PaymentError('VALIDATION', `Order ${input.orderRef} is cancelled.`, { provider: 'skydo' });
-      const dup = e.receipts.find((r) => r.receiptId === receiptId);
+      // One Skydo transfer can only pay one order.
+      for (const other of all.values()) {
+        if (other.orderRef !== e.orderRef && other.receipts.some((r) => normalizeReceiptId(r.receiptId) === key)) {
+          throw new PaymentError('IDEMPOTENCY_CONFLICT', `Receipt ${receiptId} is already recorded on order ${other.orderRef}.`, { provider: 'skydo' });
+        }
+      }
+      const dup = e.receipts.find((r) => normalizeReceiptId(r.receiptId) === key);
       if (dup) {
         if (dup.amount !== input.amountReceived) {
           throw new PaymentError('IDEMPOTENCY_CONFLICT', `Receipt ${receiptId} was already recorded with amount ${dup.amount}.`, { provider: 'skydo' });
@@ -428,7 +466,7 @@ export class SkydoGateway implements PaymentGateway {
       e.status = e.amountReceived >= e.amount ? 'captured' : 'pending';
       e.updatedAt = now;
       return e;
-    })!;
+    }))!;
     return this.ledgerStatus(entry);
   }
 

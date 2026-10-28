@@ -15,6 +15,7 @@ import type {
   CreateSubscriptionInput,
   ListSettlementsInput,
   NormalizedWebhookEvent,
+  PaymentStatus,
   PaymentStatusInput,
   ProviderId,
   RefundInput,
@@ -51,22 +52,39 @@ export interface PaymentsClientOptions {
 const ORDER_REF = /^[A-Za-z0-9_-]{3,40}$/;
 
 /**
- * Gateways whose webhook authentication does not protect the body. PhonePe signs nothing (a static
- * SHA256(user:pass) header); CCAvenue's AES-CBC has no MAC, so ciphertext can be bit-flipped.
+ * Baseline: request fields that carry the amount, order id, credentials or redirect targets on some
+ * gateway. providerOptions may add fields but never override these: the amount we validated must be
+ * the amount the gateway sees, and an agent must not be able to redirect the money or the callback.
+ * Each provider module adds its own keys (ProviderModule.protectedOptionKeys) for money routing
+ * (splits, transfers, connected accounts), manual capture and nested binding keys.
  */
-/**
- * Request fields that carry the amount, order id, credentials or redirect targets on some gateway.
- * providerOptions may add fields but never override these: the amount we validated must be the
- * amount the gateway sees, and an agent must not be able to redirect the money or the callback.
- */
-const PROTECTED_PROVIDER_OPTIONS = new Set([
+const BASELINE_PROTECTED_OPTIONS: readonly string[] = [
   'amount', 'currency', 'key', 'hash', 'salt', 'txnid', 'surl', 'furl', 'productinfo',
   'order_id', 'order_amount', 'order_currency', 'merchant_id', 'access_code', 'redirect_url', 'cancel_url',
   'orderId', 'mid', 'txnAmount', 'callbackUrl', 'websiteName',
   'merchantOrderId', 'merchantUrls', 'paymentFlow', 'receipt',
   'success_url', 'line_items', 'client_reference_id', 'mode', 'payment_intent_data',
-]);
+];
 
+/** createPayment results carry short-lived checkout data (Paytm txnToken: 15 min; PhonePe redirectUrl). */
+const CREATE_PAYMENT_IDEMPOTENCY_TTL_SECONDS = 10 * 60;
+
+/** Statuses where the money is collected and still (at least partly) with the merchant. */
+const PAID_STATUSES: ReadonlySet<PaymentStatus> = new Set(['captured', 'partially_refunded']);
+
+/** A refund POST error that may mean "a refund with this refundRef already exists". */
+function mayAlreadyExist(err: unknown): boolean {
+  if (!(err instanceof PaymentError)) return false;
+  if (err.code === 'OUTCOME_UNKNOWN') return true;
+  if (err.code !== 'PROVIDER_ERROR' && err.code !== 'VALIDATION') return false;
+  const text = `${err.message} ${err.providerMessage ?? ''} ${err.providerCode ?? ''}`;
+  return /duplicate|already (exists|raised|been|processed)|already_exists/i.test(text);
+}
+
+/**
+ * Gateways whose webhook authentication does not protect the body. PhonePe signs nothing (a static
+ * SHA256(user:pass) header); CCAvenue's AES-CBC has no MAC, so ciphertext can be bit-flipped.
+ */
 const WEBHOOK_BODY_UNAUTHENTICATED: ReadonlySet<ProviderId> = new Set(['phonepe', 'ccavenue']);
 
 /**
@@ -87,9 +105,11 @@ export class PaymentsClient {
   private readonly fetchImpl?: FetchLike;
   private readonly actor: string;
   private readonly guardLiveMutations: boolean;
+  private readonly env: Env;
 
   constructor(opts: PaymentsClientOptions = {}) {
-    const base = loadConfigFromEnv(opts.env ?? process.env, allCapabilities());
+    this.env = opts.env ?? process.env;
+    const base = loadConfigFromEnv(this.env, allCapabilities());
     this.config = { ...base, ...(opts.config ?? {}), credentials: { ...base.credentials, ...(opts.config?.credentials ?? {}) } };
     this.logger = opts.logger ?? createLogger(this.config.logLevel, { svc: 'india-payments-mcp' });
     this.idem = opts.idempotencyStore ?? new MemoryIdempotencyStore();
@@ -133,7 +153,8 @@ export class PaymentsClient {
     if (cached) return cached;
     const mod = this.module(provider);
     let gw: PaymentGateway;
-    if (this.config.mode === 'mock' && process.env.NODE_ENV === 'production' && !/^(1|true)$/i.test(process.env.PAYMENTS_ALLOW_MOCK_IN_PRODUCTION ?? '')) {
+    // Read from the env the client was built with (opts.env), so injected env objects behave consistently.
+    if (this.config.mode === 'mock' && this.env.NODE_ENV === 'production' && !/^(1|true)$/i.test(this.env.PAYMENTS_ALLOW_MOCK_IN_PRODUCTION ?? '')) {
       throw new PaymentError('CONFIG_INVALID', 'PAYMENTS_MODE=mock with NODE_ENV=production. Mock mode accepts simulated payments; refusing to run it in production.', {
         hint: 'Use sandbox or live, or set PAYMENTS_ALLOW_MOCK_IN_PRODUCTION=true for a demo deployment.',
       });
@@ -216,13 +237,35 @@ export class PaymentsClient {
   }
 
   private assertLiveMutationAllowed(action: string, provider: ProviderId, confirmed: boolean) {
-    if (this.config.mode !== 'live' || !this.guardLiveMutations) return;
+    if (!this.guardLiveMutations || this.config.mode === 'mock') return;
+    // Skydo has no sandbox: "sandbox" Skydo is the merchant's real ledger / Zoho Books, so the gate
+    // applies in every non-mock mode.
+    const realData = this.config.mode === 'live' || provider === 'skydo';
+    if (!realData) return;
     if (!this.config.allowLiveMutations || !confirmed) {
       throw new PaymentError(
         'LIVE_MUTATION_BLOCKED',
-        `${action} on ${provider} in LIVE mode is blocked.`,
+        this.config.mode === 'live'
+          ? `${action} on ${provider} in LIVE mode is blocked.`
+          : `${action} on ${provider} is blocked: Skydo has no sandbox, so ${this.config.mode} mode works on real data.`,
         { provider, hint: 'Set PAYMENTS_ALLOW_LIVE_MUTATIONS=true on the server AND pass confirm=true on the call after a human has approved it.' },
       );
+    }
+  }
+
+  /** providerOptions may add fields but never override the baseline or the gateway's own protected keys. */
+  private assertProviderOptions(provider: ProviderId, op: 'payment' | 'subscription', options: Record<string, unknown> | undefined) {
+    if (!options) return;
+    const own = PROVIDERS[provider]?.protectedOptionKeys?.[op] ?? [];
+    const blocked = new Set<string>([...BASELINE_PROTECTED_OPTIONS, ...own]);
+    const overridden = Object.keys(options).filter((k) => blocked.has(k));
+    if (overridden.length) {
+      throw new PaymentError('VALIDATION', `providerOptions may not set protected ${provider} fields: ${overridden.join(', ')}.`, {
+        provider,
+        hint:
+          'Amount, orderRef, currency, URLs and metadata go through the normal inputs (metadata via input.metadata). ' +
+          'Fields that route money elsewhere (splits, transfers, connected accounts) or change capture are not allowed through providerOptions.',
+      });
     }
   }
 
@@ -250,16 +293,17 @@ export class PaymentsClient {
     }
     if (provider === 'skydo') this.assertSkydoCurrency(input.currency, input.amount);
     const currency = (input.currency ?? 'INR').toUpperCase();
-    const overridden = Object.keys(input.providerOptions ?? {}).filter((k) => PROTECTED_PROVIDER_OPTIONS.has(k));
-    if (overridden.length) {
-      throw new PaymentError('VALIDATION', `providerOptions may not override core fields: ${overridden.join(', ')}.`, {
-        hint: 'Set amount, orderRef, currency and URLs through the normal inputs.',
-      });
-    }
+    this.assertProviderOptions(provider, 'payment', input.providerOptions);
     const gw = this.requireFeature(provider, 'createPayment', 'createPayment');
+    // Short TTL: the cached result holds checkout tokens/URLs that expire (Paytm txnToken 15 min).
     return this.audited({ action: 'create_payment', provider, orderRef: input.orderRef, amount: input.amount, currency }, () =>
-      withIdempotency(this.idem, `${provider}:create_payment`, input.idempotencyKey ?? input.orderRef, { ...input, currency }, () =>
-        gw.createPayment({ ...input, currency }),
+      withIdempotency(
+        this.idem,
+        `${provider}:create_payment`,
+        input.idempotencyKey ?? input.orderRef,
+        { ...input, currency },
+        () => gw.createPayment({ ...input, currency }),
+        CREATE_PAYMENT_IDEMPOTENCY_TTL_SECONDS,
       ),
     );
   }
@@ -281,14 +325,21 @@ export class PaymentsClient {
       };
     }
 
-    const settled = result.status === 'captured' || result.status === 'authorized' || result.status === 'refunded' || result.status === 'partially_refunded';
+    // Money collected and still with the merchant. `authorized` is NOT paid: this library has no
+    // capture API, and uncaptured authorisations lapse (Razorpay auto-refunds, Stripe after ~7 days).
+    // A fully `refunded` payment is not paid either: replaying an old success URL must not re-fulfil.
+    const settled = PAID_STATUSES.has(result.status);
     // `paid` requires the caller to have bound the callback to THEIR order and amount; otherwise a
     // genuine callback for some other (cheap) order would count as payment for this one.
     const bound = input.orderRef !== undefined && input.expectedAmount !== undefined;
+    let reason = result.reason;
+    if (result.valid && settled && !bound) reason = 'Pass orderRef and expectedAmount to get paid=true: an unbound callback could belong to a different order.';
+    else if (result.valid && result.status === 'authorized') reason = result.reason ?? 'Payment is authorised but not captured; capture it or enable auto-capture. paid=false until it is captured.';
+    else if (result.valid && result.status === 'refunded') reason = 'Payment was fully refunded; it no longer counts as paid.';
     return {
       ...result,
       paid: result.valid && settled && bound,
-      ...(result.valid && settled && !bound ? { reason: 'Pass orderRef and expectedAmount to get paid=true: an unbound callback could belong to a different order.' } : {}),
+      ...(reason !== undefined ? { reason } : {}),
     };
   }
 
@@ -305,8 +356,37 @@ export class PaymentsClient {
     return this.audited({ action: 'refund', provider, orderRef: input.orderRef, refundRef: input.refundRef, amount: input.amount }, async () => {
       this.assertLiveMutationAllowed('Refund', provider, opts.confirm === true);
       // refundRef is the idempotency key: the same refundRef can never trigger two refunds through this client.
-      return withIdempotency(this.idem, `${provider}:refund`, input.refundRef, input, () => gw.refund(input));
+      return withIdempotency(this.idem, `${provider}:refund`, input.refundRef, input, () => this.refundOrFindExisting(provider, gw, input));
     });
+  }
+
+  /**
+   * gw.refund, but when the outcome is unknown (lost response) or the gateway rejects the refundRef as a
+   * duplicate, look the refund up by refundRef first: if it exists, return it instead of an error that
+   * reads like "no refund happened". Gateways without a refundRef lookup (PayU, CCAvenue) rethrow.
+   */
+  private async refundOrFindExisting(provider: ProviderId, gw: PaymentGateway & Required<Pick<PaymentGateway, 'refund'>>, input: RefundInput): Promise<RefundResult> {
+    try {
+      return await gw.refund(input);
+    } catch (err) {
+      if (!mayAlreadyExist(err) || !gw.getRefundStatus || gw.capabilities().features.refundStatus.support === 'unsupported') throw err;
+      let found: RefundResult;
+      try {
+        found = await gw.getRefundStatus({ refundRef: input.refundRef, orderRef: input.orderRef, providerPaymentId: input.providerPaymentId });
+      } catch (lookupErr) {
+        this.logger.warn('refund.lookup_after_error_failed', { provider, refundRef: input.refundRef, err: String(lookupErr) });
+        throw err;
+      }
+      if (input.amount !== undefined && found.amount !== undefined && found.amount !== input.amount) {
+        throw new PaymentError('IDEMPOTENCY_CONFLICT', `A ${provider} refund with refundRef "${input.refundRef}" already exists for ${found.amount}, not ${input.amount}.`, {
+          provider,
+          hint: 'Use a new refundRef for a different refund.',
+          raw: found.raw,
+        });
+      }
+      this.logger.info('refund.found_existing', { provider, refundRef: input.refundRef, cause: (err as PaymentError).code });
+      return found;
+    }
   }
 
   async getRefundStatus(provider: ProviderId, input: RefundStatusInput) {
@@ -327,7 +407,7 @@ export class PaymentsClient {
   }
 
   async simulateWebhook(provider: ProviderId, input: SimulateWebhookInput) {
-    const gw = this.gateway(provider);
+    const gw = this.requireFeature(provider, 'webhooks', 'parseWebhook');
     if (!gw.simulateWebhook) throw notImplemented(provider, 'webhook simulation');
     if (this.config.mode === 'live') {
       throw new PaymentError('LIVE_MUTATION_BLOCKED', 'Webhook simulation is disabled in live mode.', { provider });
@@ -340,6 +420,7 @@ export class PaymentsClient {
   }
 
   async createSubscription(provider: ProviderId, input: CreateSubscriptionInput) {
+    this.assertProviderOptions(provider, 'subscription', input.providerOptions);
     const gw = this.requireFeature(provider, 'subscriptions', 'createSubscription');
     return this.audited({ action: 'create_subscription', provider, orderRef: input.subscriptionRef }, () => gw.createSubscription(input));
   }
