@@ -1,5 +1,5 @@
 ---
-description: Indian payment gateway integrations (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe India, Skydo) - checkout, UPI, callbacks, webhooks, refunds, subscriptions, reconciliation
+description: Indian payment gateway integrations (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe India, Skydo, Infinity) - checkout, UPI, callbacks, webhooks, refunds, subscriptions, reconciliation
 globs:
 alwaysApply: false
 ---
@@ -18,6 +18,6 @@ Rules you must not break:
 - Unique orderRef per attempt; idempotent creation. Refunds idempotent by a refundRef reused on retry.
 - Secrets server-only (no `NEXT_PUBLIC_`/`VITE_`/`EXPO_PUBLIC_`/`REACT_APP_`, no mobile bundles, no logs).
 - Reconciliation job for stuck attempts; handle pending UPI without failing on timeout.
-- Shopify: install the gateway's official app; do not write a checkout gateway. Skydo: no API. Stripe India: invite-only.
+- Shopify: install the gateway's official app; do not write a checkout gateway. Skydo and Infinity: no API (Zoho Books bridge or a receipts ledger). Stripe India: invite-only.
 
 When working on the india-payments-mcp repository itself, follow `AGENTS.md`.

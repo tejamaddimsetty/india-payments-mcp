@@ -18,6 +18,7 @@ export const PROVIDER_IDS = [
   'phonepe',
   'stripe',
   'skydo',
+  'infinity',
 ] as const;
 
 export type ProviderId = (typeof PROVIDER_IDS)[number];

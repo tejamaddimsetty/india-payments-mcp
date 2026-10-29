@@ -27,6 +27,10 @@ Phases are ordered by what unblocks real production use first. Items move to the
 - [x] Sandbox smoke-test script (`npm run sandbox:smoke`) and stdio/HTTP end-to-end tests
 - [x] Round 3 adversarial reviews fixed: `paid` only for `captured` / `partially_refunded`; Razorpay full-payment check; per-gateway `providerOptions` guard for payments and subscriptions; refund lookup by `refundRef` after `OUTCOME_UNKNOWN` or a duplicate; Cashfree refunded states; mock mirrors real input rules; webhook dedupe on confirmed data; Skydo twin invoices, ledger lock, receipt gate in sandbox; CJS-friendly `exports` ([design-review.md](design-review.md#round-3))
 
+## Phase 0.6: Infinity (done, 0.3.0)
+
+- [x] Infinity adapter: Zoho Books bridge (`INFINITY_ZOHO_*`), bank transfer and QuickLinks with a receipts ledger, on the Skydo code now shared in `src/providers/shared/`; `payments_infinity_record_payment`, `payments_infinity_outstanding` (21 tools); code generator; recommender ranks it second for `exporter_collections`
+
 ## Phase 1: production hardening (next)
 
 - [ ] **Shared stores**: `RedisIdempotencyStore` (claim with `SET NX` before calling the gateway, which closes the in-process race), `RedisWebhookDedupeStore`, and Postgres equivalents. Ship as optional subpath exports so the core stays at two dependencies
@@ -66,6 +70,7 @@ Phases are ordered by what unblocks real production use first. Items move to the
 - [ ] **Python SDK** (same types and capability JSON; generated from the TS capability maps to avoid drift)
 - [ ] **Skydo API: switch when Skydo ships it.** Skydo announced developer APIs and webhooks in December 2025 with no date. When a public API exists, move create, status and refunds (if offered) to it and add webhook verification, keeping the Zoho Books bridge and ledger for existing users. Watch `developer.skydo.com` (an empty placeholder as of 2026-10-29) and Skydo's "What's new" blog
 - [ ] Skydo ledger mode: import Skydo's Reports-tab export to match receipts automatically instead of recording them by hand (the export format is undocumented; confirm with a real account first)
+- [ ] **Infinity: confirm its Zoho Books integration, and an API if one is published.** Infinity's Terms mention an API but no documentation is public (2026-10-29). If Infinity publishes docs (ask support@infinityapp.in), move create, status and QuickLink creation to them, keeping the Zoho bridge and ledger for existing users
 - [ ] More frameworks in the code generator
 - [ ] Hosted docs site generated from capability maps
 - [ ] Additional gateways on request (for example Juspay/HyperCheckout, Easebuzz, Instamojo, BillDesk), subject to the same verification standard
@@ -74,4 +79,4 @@ Phases are ordered by what unblocks real production use first. Items move to the
 
 - Handling raw card data in any form (PCI scope)
 - Acting as a Shopify payments extension (partner-only platform)
-- Unofficial / scraped APIs (for example a Skydo dashboard scraper)
+- Unofficial / scraped APIs (for example a Skydo or Infinity dashboard scraper)

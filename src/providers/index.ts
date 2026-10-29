@@ -2,6 +2,7 @@ import type { ProviderCapabilities } from '../core/capabilities.js';
 import type { ProviderModule } from '../core/gateway.js';
 import type { ProviderId } from '../core/types.js';
 import { cashfree } from './cashfree/adapter.js';
+import { infinity } from './infinity/adapter.js';
 import { ccavenue } from './ccavenue/adapter.js';
 import { payu } from './payu/adapter.js';
 import { paytm } from './paytm/adapter.js';
@@ -20,6 +21,7 @@ export const PROVIDERS: Record<ProviderId, ProviderModule<any>> = {
   phonepe,
   stripe,
   skydo,
+  infinity,
 };
 
 export function allCapabilities(): ProviderCapabilities[] {

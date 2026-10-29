@@ -18,7 +18,7 @@ This document covers deliverables A (overview), B (team responsibilities), D (un
   src/cli.ts        │ CLI: stdio (default) | http (/mcp, /healthz) | doctor             │
                     └───────────────────────────────┬───────────────────────────────────┘
                     ┌───────────────────────────────▼───────────────────────────────────┐
-  src/mcp/server.ts │ MCP server: 19 tools, 2 resources, 1 prompt. zod schemas,         │
+  src/mcp/server.ts │ MCP server: 21 tools, 2 resources, 1 prompt. zod schemas,         │
                     │ snake_case args -> camelCase SDK calls, `raw` stripped by default  │
                     └───────────────────────────────┬───────────────────────────────────┘
   Your app ───────────────────────────────────────► │  (SDK users call PaymentsClient directly)
@@ -31,7 +31,7 @@ This document covers deliverables A (overview), B (team responsibilities), D (un
                     ┌──────▼────────┐   ┌─────────────▼─────────────────────────┐ │
   src/mock          │ MockGateway   │   │ Provider adapters (src/providers/*)   │ │
                     │ + MockLedger  │   │ razorpay payu cashfree ccavenue paytm │ │
-                    │ (no network)  │   │ phonepe stripe skydo                  │ │
+                    │ (no network)  │   │ phonepe stripe skydo infinity         │ │
                     └───────────────┘   └─────────────┬─────────────────────────┘ │
                                         ┌─────────────▼──────────────┐   ┌────────▼─────────┐
   src/core                              │ HttpClient: timeout, safe  │   │ AuditSink        │
@@ -75,7 +75,7 @@ sequenceDiagram
     A->>M: payments_refund {refund_ref, confirm?}
     M->>C: refund(..., {confirm})
     C->>C: requireFeature('refund')
-    C->>C: live + MCP caller? needs PAYMENTS_ALLOW_LIVE_MUTATIONS && confirm, else LIVE_MUTATION_BLOCKED (also for cancellations and Skydo receipts)
+    C->>C: live + MCP caller? needs PAYMENTS_ALLOW_LIVE_MUTATIONS && confirm, else LIVE_MUTATION_BLOCKED (also for cancellations and Skydo/Infinity receipts)
     C->>I: idempotency keyed by refund_ref
     C->>G: refund()
     C->>L: {action: refund, outcome: success | error | blocked}
@@ -87,9 +87,9 @@ sequenceDiagram
 2. **Integer minor units everywhere** (paise for INR, cents for USD). Adapters convert to the gateway's format: rupee strings for PayU/Paytm/CCAvenue, rupee numbers for Cashfree, paise for Razorpay/PhonePe/Stripe. `src/core/money.ts` has `toMajorString` and `fromMajor`.
 3. **`orderRef` is the merchant's key.** Adapters send it to the gateway (Razorpay `receipt` + `notes.order_ref`, Cashfree `order_id`, PhonePe `merchantOrderId`, ...) and map gateway ids back to it.
 4. **Four checkout shapes.** `js_sdk`, `redirect`, `form_post`, `manual`. A frontend that handles these four handles every gateway.
-5. **Verification is explicit about how it verified.** `verifiedVia` is one of `signature`, `status_api`, `decryption` or `manual_record`. Gateways with unsigned redirects (PhonePe, Cashfree, Stripe) are verified by calling the status API. CCAvenue's decrypted result is re-confirmed through the status API. Skydo has no callback: it reads the Zoho invoice (`status_api`) or the ledger entry you recorded (`manual_record`). `PaymentsClient` adds `paid`, which is true only when the result is valid, the status is `captured` or `partially_refunded` (not `authorized`, not fully `refunded`), and the caller passed both `orderRef` and `expectedAmount`.
+5. **Verification is explicit about how it verified.** `verifiedVia` is one of `signature`, `status_api`, `decryption` or `manual_record`. Gateways with unsigned redirects (PhonePe, Cashfree, Stripe) are verified by calling the status API. CCAvenue's decrypted result is re-confirmed through the status API. Skydo and Infinity have no callback: they read the Zoho invoice (`status_api`) or the ledger entry you recorded (`manual_record`). `PaymentsClient` adds `paid`, which is true only when the result is valid, the status is `captured` or `partially_refunded` (not `authorized`, not fully `refunded`), and the caller passed both `orderRef` and `expectedAmount`.
 6. **Nothing hidden.** Every result carries `raw` (the untouched gateway response). The MCP layer strips it by default to save agent context, and `include_raw: true` brings it back.
-7. **Mock mode is a first-class gateway.** It's not a stub. `MockGateway` keeps the real capability map, signs callbacks and webhooks with HMAC, tracks refund balances, and shares one `MockLedger` across tool calls. It mirrors the real adapters' input rules (required `providerOrderId` / `providerPaymentId`, INR only for PayU/Paytm/PhonePe, duplicate-refund behaviour, refused webhook simulations), and verifies Skydo, Cashfree, PhonePe and Stripe by status lookup as their real adapters do.
+7. **Mock mode is a first-class gateway.** It's not a stub. `MockGateway` keeps the real capability map, signs callbacks and webhooks with HMAC, tracks refund balances, and shares one `MockLedger` across tool calls. It mirrors the real adapters' input rules (required `providerOrderId` / `providerPaymentId`, INR only for PayU/Paytm/PhonePe, duplicate-refund behaviour, refused webhook simulations), and verifies Skydo, Infinity, Cashfree, PhonePe and Stripe by status lookup as their real adapters do.
 
 ---
 
@@ -115,7 +115,7 @@ This repository was designed and built by a team of specialised agents with a hu
 Conventions for all tools:
 
 - Arguments are `snake_case`. The SDK equivalents are `camelCase` on `PaymentsClient`.
-- `provider` ∈ `razorpay | payu | cashfree | ccavenue | paytm | phonepe | stripe | skydo`.
+- `provider` ∈ `razorpay | payu | cashfree | ccavenue | paytm | phonepe | stripe | skydo | infinity`.
 - Amounts: a positive integer in the minor unit of the currency (paise for INR, cents for USD; `z.number().int().positive()`).
 - `ref` (order_ref, refund_ref, subscription_ref): `^[A-Za-z0-9_-]{3,40}$`.
 - `include_raw` (optional boolean): keeps the provider's raw response in the output.
@@ -139,7 +139,7 @@ Error codes: `CONFIG_MISSING`, `CONFIG_INVALID`, `VALIDATION`, `UNSUPPORTED`, `N
 |---|---|---|---|
 | `payments_list_providers` | none | `{ mode, providers: [{ id, name, summary, configured, features: { <FeatureKey>: SupportLevel } }] }`. `configured` is always `true` in mock mode | readOnly |
 | `payments_get_capabilities` | `provider` | `ProviderCapabilities`: `{ provider, displayName, website, docsUrl, dashboardUrl?, summary, features: { <FeatureKey>: { support, notes? } }, paymentMethods[], currencies, checkoutTypes[], providerAmountFormat, credentials: [{ env, key, required, secret, description }], constraints[], officialSdks{}, platformPlugins{}, lastVerified }` | readOnly |
-| `payments_check_config` | `provider?` | `{ mode, allowLiveMutations, auditLog, providers: [{ provider, ready, missing[], present[], optionalMissing[], initError?, setup? }] }`. Lists env var **names** only. `initError` appears when credentials exist but the adapter rejects them (for example a live key in sandbox). `setup` (with `ready: false`) appears for Skydo when neither mode is configured | readOnly |
+| `payments_check_config` | `provider?` | `{ mode, allowLiveMutations, auditLog, providers: [{ provider, ready, missing[], present[], optionalMissing[], initError?, setup? }] }`. Lists env var **names** only. `initError` appears when credentials exist but the adapter rejects them (for example a live key in sandbox). `setup` (with `ready: false`) appears for Skydo and Infinity when no mode is configured | readOnly |
 | `payments_recommend_gateway` | `needs: ("subscriptions"\|"international"\|"upi"\|"refunds"\|"settlements"\|"shopify"\|"woocommerce"\|"mobile_sdk"\|"webhooks"\|"exporter_collections"\|"fast_integration")[]` (most important first), `business?` | `{ ranking: [{ provider, name, score, matches[], blockers[], summary, constraints[≤3] }], note }`. A heuristic built from capability maps plus small documented priors | readOnly |
 
 `FeatureKey` ∈ `createPayment, verifyPayment, paymentStatus, refund, refundStatus, webhooks, customers, subscriptions, settlements, payouts, paymentLinks`.
@@ -148,8 +148,8 @@ Error codes: `CONFIG_MISSING`, `CONFIG_INVALID`, `VALIDATION`, `UNSUPPORTED`, `N
 
 | Tool | Args | Returns | Annotations |
 |---|---|---|---|
-| `payments_create_payment` | `provider`, `order_ref`, `amount` (minor units of `currency`: paise for INR, cents for USD), `currency?` (ISO 4217, default INR; required for Skydo, which rejects INR), `customer?: { id?, name?, email?, phone? }`, `description?` (≤255), `return_url?`, `notify_url?`, `metadata?: Record<string,string>`, `idempotency_key?` (≤64, default `order_ref`; cached 10 minutes in process), `provider_options?: Record<string,unknown>` (merged into the gateway request; a baseline list plus per-gateway keys that set the amount, order id, URLs or metadata, route money elsewhere or change capture are rejected with `VALIDATION`; see [security.md](security.md#provider_options-guard)), `include_raw?` | `CreatePaymentResult`: `{ provider, environment: "sandbox"\|"live", orderRef, providerOrderId, status, amount, currency, checkout: CheckoutAction, expiresAt?, raw? }` | idempotent, openWorld |
-| `payments_verify_payment` | `provider`, `payload: Record<string,string>` (callback fields exactly as received; `{}` for Skydo), `order_ref` (required), `expected_amount` (required), `provider_order_id?` (the id you stored from create; recommended, and used by Razorpay to compute the signature), `include_raw?` | `VerifyPaymentResult`: `{ valid, paid, status, orderRef?, providerOrderId?, providerPaymentId?, amount?, reason?, verifiedVia: "signature"\|"status_api"\|"decryption"\|"manual_record", raw? }`. An invalid signature returns `valid: false` with a `reason`. It does not throw. `paid` = `valid` + status `captured`/`partially_refunded` + both bindings; Razorpay reports `captured` only when the order is fully paid. **Fulfil only when `paid` is `true`** | readOnly, openWorld |
+| `payments_create_payment` | `provider`, `order_ref`, `amount` (minor units of `currency`: paise for INR, cents for USD), `currency?` (ISO 4217, default INR; required for Skydo and Infinity, which reject INR), `customer?: { id?, name?, email?, phone? }`, `description?` (≤255), `return_url?`, `notify_url?`, `metadata?: Record<string,string>`, `idempotency_key?` (≤64, default `order_ref`; cached 10 minutes in process), `provider_options?: Record<string,unknown>` (merged into the gateway request; a baseline list plus per-gateway keys that set the amount, order id, URLs or metadata, route money elsewhere or change capture are rejected with `VALIDATION`; see [security.md](security.md#provider_options-guard)), `include_raw?` | `CreatePaymentResult`: `{ provider, environment: "sandbox"\|"live", orderRef, providerOrderId, status, amount, currency, checkout: CheckoutAction, expiresAt?, raw? }` | idempotent, openWorld |
+| `payments_verify_payment` | `provider`, `payload: Record<string,string>` (callback fields exactly as received; `{}` for Skydo and Infinity), `order_ref` (required), `expected_amount` (required), `provider_order_id?` (the id you stored from create; recommended, and used by Razorpay to compute the signature), `include_raw?` | `VerifyPaymentResult`: `{ valid, paid, status, orderRef?, providerOrderId?, providerPaymentId?, amount?, reason?, verifiedVia: "signature"\|"status_api"\|"decryption"\|"manual_record", raw? }`. An invalid signature returns `valid: false` with a `reason`. It does not throw. `paid` = `valid` + status `captured`/`partially_refunded` + both bindings; Razorpay reports `captured` only when the order is fully paid. **Fulfil only when `paid` is `true`** | readOnly, openWorld |
 | `payments_get_status` | `provider`, `order_ref`, `provider_order_id?` (Razorpay and Stripe require it), `provider_payment_id?` (CCAvenue `reference_no`), `include_raw?` | `PaymentStatusResult`: `{ provider, orderRef, providerOrderId?, providerPaymentId?, status, amount?, amountRefunded?, currency?, method?, failureReason?, raw? }` | readOnly, openWorld |
 | `payments_refund` | `provider`, `order_ref`, `refund_ref`, `provider_payment_id?` (required by Razorpay, PayU, Paytm, CCAvenue, Stripe), `amount?` (omit = full), `reason?` (≤255), `speed?: "normal"\|"instant"`, `confirm?`, `include_raw?` | `RefundResult`: `{ provider, refundRef, providerRefundId?, status: "pending"\|"processed"\|"failed"\|"unknown", amount?, raw? }`. Cached 24 h in process; after `OUTCOME_UNKNOWN` or a duplicate rejection the existing refund is looked up by `refund_ref` (not on PayU/CCAvenue) | **destructive**, idempotent, openWorld |
 | `payments_get_refund_status` | `provider`, `refund_ref`, `order_ref?`, `provider_refund_id?`, `provider_payment_id?`, `include_raw?` | `RefundResult`. Ids: Razorpay `provider_refund_id`, or `provider_payment_id` to find it by `refund_ref`; PayU `provider_refund_id`; Cashfree/Paytm `order_ref` + `refund_ref`; PhonePe `refund_ref`; Stripe `provider_refund_id` or `provider_payment_id`; CCAvenue none | readOnly, openWorld |
@@ -160,7 +160,7 @@ Error codes: `CONFIG_MISSING`, `CONFIG_INVALID`, `VALIDATION`, `UNSUPPORTED`, `N
 { type: 'redirect'; url: string; method: 'GET' }
 { type: 'form_post'; url: string; fields: Record<string, string> }   // auto-submit an HTML form
 { type: 'js_sdk'; sdk: 'razorpay' | 'cashfree' | 'stripe' | 'paytm'; scriptUrl: string; options: Record<string, unknown> } // publishable values only
-{ type: 'manual'; instructions: string; url?: string }                // mock mode; Skydo (transfer instructions, Zoho invoice url)
+{ type: 'manual'; instructions: string; url?: string }                // mock mode; Skydo, Infinity (transfer instructions, QuickLink or Zoho invoice url)
 ```
 
 `PaymentStatus` ∈ `created, pending, authorized, captured, failed, cancelled, expired, refunded, partially_refunded, unknown`. **`captured` means success.** `authorized` means the money is not collected yet (manual-capture card flows, or a Razorpay signature verified before auto-capture has run); it is never `paid`, and this library has no capture API, so keep auto-capture on. `refunded` (full refund) is not `paid` either.
@@ -200,6 +200,17 @@ Skydo has no API; see [skydo.md](skydo.md). These two tools work in `sandbox` an
 | `payments_skydo_outstanding` | none | `{ mode: "ledger"\|"zoho", outstanding: LedgerEntry[], note? }`: ledger entries with status `created` or `pending`, oldest first. In Zoho mode `outstanding` is empty and `note` points to Zoho Books | readOnly |
 
 SDK equivalents: `PaymentsClient.skydoRecordPayment({ orderRef, receiptId, amountReceived, receivedAt?, firaNumber?, note? }, { confirm? })` and `PaymentsClient.skydoOutstanding()`.
+
+### Infinity
+
+Infinity publishes no API; see [infinity.md](infinity.md). Three modes: Zoho Books bridge (all `INFINITY_ZOHO_*` set; what Infinity's Zoho integration syncs is not publicly documented, so confirm with a first real invoice), bank transfer (`INFINITY_RECEIVING_ACCOUNTS`) and QuickLink (`provider_options.quickLinkUrl`, a link created by hand in the Infinity dashboard; https on `INFINITY_QUICKLINK_HOSTS` only). The two tools mirror Skydo's and work in `sandbox` and `live` mode only (mock mode returns `VALIDATION`).
+
+| Tool | Args | Returns | Annotations |
+|---|---|---|---|
+| `payments_infinity_record_payment` | `order_ref`, `receipt_id` (1-100 chars: the Infinity transaction reference from the dashboard), `amount_received`, `received_at?`, `fira_number?`, `note?`, `confirm?` (required `true` in sandbox and live: Infinity documents no sandbox) | Same as `payments_skydo_record_payment`: `captured` once receipts reach the amount, else `pending`; idempotent per `receipt_id` (case-insensitive; an id already on another order = `IDEMPOTENCY_CONFLICT`). Ledger modes only: `VALIDATION` with the Zoho bridge (Zoho is the record). Audited as `infinity_record_payment` | **destructive**, idempotent |
+| `payments_infinity_outstanding` | none | `{ mode: "ledger"\|"zoho", outstanding: LedgerEntry[], note? }`, oldest first. In Zoho mode `outstanding` is empty and `note` points to Zoho Books | readOnly |
+
+SDK equivalents: `PaymentsClient.infinityRecordPayment(input, { confirm? })` and `PaymentsClient.infinityOutstanding()`.
 
 ### Resources and prompts
 
@@ -375,8 +386,10 @@ india-payments-mcp/
 │   │   └── money.ts             minor <-> major-unit conversion, validation
 │   ├── providers/
 │   │   ├── index.ts             Registry: PROVIDERS, allCapabilities()
-│   │   └── <id>/capabilities.ts, adapter.ts (+ helpers such as paytm/checksum.ts, stripe/form.ts,
-│   │                                skydo/zoho.ts, skydo/accounts.ts, skydo/ledger.ts)
+│   │   ├── shared/              No-API collection code used by Skydo and Infinity: accounts.ts,
+│   │   │                        ledger.ts, manual-collections.ts, zoho.ts, zoho-bridge.ts
+│   │   └── <id>/capabilities.ts, adapter.ts (+ helpers such as paytm/checksum.ts, stripe/form.ts;
+│   │                                skydo/zoho.ts, accounts.ts, ledger.ts re-export shared/)
 │   ├── mock/mock-gateway.ts     MockGateway + MockLedger
 │   ├── webhooks/handler.ts      createWebhookHandler, WebhookDedupeStore
 │   ├── mcp/server.ts            Tools, resources, prompts
@@ -385,8 +398,8 @@ india-payments-mcp/
 ├── scripts/sandbox-smoke.ts     smoke test against real gateway sandboxes (npm run sandbox:smoke)
 ├── docs/
 │   ├── research/gateway-api-facts.md
-│   ├── research/verification/   line-by-line adapter checks against official docs, Skydo API search
-│   └── architecture, gateway-matrix, payloads, skydo, webhooks, security, testing,
+│   ├── research/verification/   line-by-line adapter checks against official docs, Skydo and Infinity API searches
+│   └── architecture, gateway-matrix, payloads, skydo, infinity, webhooks, security, testing,
 │       reliability, risks, roadmap, design-review
 ├── examples/                    express-checkout, mcp-clients
 ├── skills/india-payments/       Claude Skill

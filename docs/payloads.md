@@ -105,7 +105,7 @@ When a live key is configured in sandbox mode, the same provider entry gains:
 { "initError": "PAYMENTS_MODE=sandbox but RAZORPAY_KEY_ID is a live key (rzp_live_). Refusing to move real money in sandbox mode." }
 ```
 
-For Skydo, every variable is optional. When neither mode is configured (or the Zoho bridge is half-configured), the entry has `ready: false` and a `setup` string, for example `"Skydo needs SKYDO_RECEIVING_ACCOUNTS (your account details from the Skydo dashboard) and/or the ZOHO_* variables for the Zoho Books bridge. ..."`; any other broken setup shows up as `initError`.
+For Skydo, every variable is optional. When neither mode is configured (or the Zoho bridge is half-configured), the entry has `ready: false` and a `setup` string, for example `"Skydo needs SKYDO_RECEIVING_ACCOUNTS (your account details from the Skydo dashboard) and/or the ZOHO_* variables for the Zoho Books bridge. ..."`; any other broken setup shows up as `initError`. Infinity works the same way: with none of `INFINITY_RECEIVING_ACCOUNTS`, `INFINITY_QUICKLINK_ONLY=true` or the `INFINITY_ZOHO_*` variables set, its entry has `ready: false` and a `setup` string; a half-configured Infinity Zoho bridge also reports `setup` (both are `CONFIG_MISSING`).
 
 ### `payments_recommend_gateway`
 
@@ -117,6 +117,7 @@ For Skydo, every variable is optional. When neither mode is configured (or the Z
 {
   "ranking": [
     { "provider": "skydo", "name": "Skydo", "score": 16, "matches": ["exporter_collections", "international"], "blockers": [], "summary": "...", "constraints": ["Skydo has no public API, SDK or webhooks, and its Terms of Use prohibit scrapers, bots and other automated access to the platform. This adapter never contacts Skydo.", "..."] },
+    { "provider": "infinity", "name": "Infinity", "score": 12, "matches": ["exporter_collections", "international"], "blockers": [], "summary": "...", "constraints": ["Infinity publishes no API docs, SDK or webhooks, and its Terms forbid reverse engineering and incorporating the Services into other systems without consent. This adapter never contacts Infinity or its dashboard.", "..."] },
     { "provider": "stripe", "name": "Stripe (India)", "score": 5, "matches": ["international"], "blockers": [], "summary": "...", "constraints": ["Stripe services are invite-only in India ...", "..."] }
   ],
   "note": "Heuristic ranking from the capability map. Pricing, settlement time and KYC approval vary by business; confirm with the gateway before committing."
@@ -702,6 +703,65 @@ With the Zoho bridge, `verifiedVia` is `"status_api"` and `providerOrderId` is t
 ```
 
 In `live` mode the message is `Recording a Skydo receipt on skydo in LIVE mode is blocked.`
+
+---
+
+## Infinity
+
+Infinity publishes no API; see [infinity.md](infinity.md) for setup. Same conventions as Skydo: amounts are minor units of the invoice currency, `currency` is required (INR is rejected), `payload: {}` for verify, and `payments_infinity_record_payment` returns the ledger entry in `raw`. Infinity documents no minimum amount, so none is enforced.
+
+### `payments_create_payment`, QuickLink + bank transfer
+
+`quickLinkUrl` is a QuickLink you created by hand in the Infinity dashboard for the same amount and currency. Only https links on `INFINITY_QUICKLINK_HOSTS` (default `infinityapp.in` and subdomains) are accepted; the code cannot check what the link charges. Without `quickLinkUrl` the instructions contain only the bank transfer; with `INFINITY_QUICKLINK_ONLY=true` and no accounts, only the link.
+
+```json
+{ "provider": "infinity", "order_ref": "INV_2026_042", "amount": 125000, "currency": "USD", "customer": { "name": "Globex Corp", "email": "ap@globex.example" }, "description": "Design retainer, March 2026", "provider_options": { "quickLinkUrl": "https://infinityapp.in/..." } }
+```
+
+```json
+{
+  "provider": "infinity",
+  "environment": "live",
+  "orderRef": "INV_2026_042",
+  "providerOrderId": "infinity:INV_2026_042",
+  "status": "created",
+  "amount": 125000,
+  "currency": "USD",
+  "checkout": {
+    "type": "manual",
+    "instructions": "Pay USD 1250.00 to Acme Exports Pvt Ltd online (card or bank transfer): https://infinityapp.in/...\nReference: INV_2026_042\n\nOr pay by bank transfer:\nPlease pay USD 1250.00 by bank transfer to Acme Exports Pvt Ltd.\nPayment reference (include it in the transfer note): INV_2026_042\n\nUS account (ACH)\nAccount holder: Acme Exports Pvt Ltd\nAccount number: ...\nACH routing: ...\n\nPayments are received through Infinity (infinityapp.in) and settled to India with a FIRA.\n\nWhen the Infinity dashboard shows the payment received, record it (MCP: payments_infinity_record_payment; SDK: client.infinityRecordPayment) with the Infinity transaction reference as receiptId.\nCheck that the QuickLink is for exactly USD 1250.00: this code cannot read what the link charges.",
+    "url": "https://infinityapp.in/..."
+  }
+}
+```
+
+A repeat call without `quickLinkUrl` reuses the stored link; a different link for the same `order_ref` is rejected with `VALIDATION` (use a new `order_ref`).
+
+### `payments_create_payment`, Zoho Books bridge
+
+With all `INFINITY_ZOHO_*` variables set, the call creates a Zoho Books invoice exactly as Skydo's bridge does (same `provider_options`, retry and twin-invoice rules; `providerOrderId` is the Zoho invoice id). The instructions say that Infinity's Zoho Books integration (Infinity dashboard > Connect > Zoho Books) works from your Zoho invoices and that the invoice counts as paid only when Zoho records payments covering its total. What that integration syncs is not publicly documented: confirm with a first real invoice that Infinity marks it paid in Zoho.
+
+### `payments_infinity_record_payment`, `payments_infinity_outstanding`
+
+Same arguments and result shapes as the Skydo tools above, with `provider: "infinity"` and `receipt_id` = the Infinity transaction reference from the dashboard. `method` is `"quicklink_or_bank_transfer"` when the order has a QuickLink, else `"international_bank_transfer"` (Zoho bridge: `"infinity_zoho_invoice"`). Record only after a human has checked the Infinity dashboard: a QuickLink being opened, or a client saying they paid, is not a payment.
+
+### Infinity errors
+
+```json
+{ "error": "VALIDATION", "message": "Infinity receives foreign currency from abroad: pass the client's currency (USD, EUR, GBP, AUD, CAD, ...). INR is not supported.", "retryable": false, "provider": "infinity" }
+```
+
+```json
+{ "error": "VALIDATION", "message": "quickLinkUrl must be an https link on infinityapp.in (got host \"evil.example\", scheme \"https:\").", "retryable": false, "provider": "infinity", "hint": "Copy the link from the Infinity dashboard. If your real QuickLinks use a different Infinity host, add it to INFINITY_QUICKLINK_HOSTS." }
+```
+
+```json
+{ "error": "VALIDATION", "message": "With the Zoho Books bridge, Zoho is the record: the payment must be recorded on the Zoho invoice (by Infinity's integration or in Zoho Books), not here.", "retryable": false, "provider": "infinity" }
+```
+
+```json
+{ "error": "LIVE_MUTATION_BLOCKED", "message": "Recording an Infinity receipt on infinity is blocked: Infinity documents no sandbox, so sandbox mode works on real data.", "retryable": false, "provider": "infinity", "hint": "Set PAYMENTS_ALLOW_LIVE_MUTATIONS=true on the server AND pass confirm=true on the call after a human has approved it." }
+```
 
 ---
 

@@ -68,7 +68,7 @@ Webhooks get lost, endpoints go down and statuses change after the fact. Run rec
 
 All of these are read-only and safe to run in `live` mode without `PAYMENTS_ALLOW_LIVE_MUTATIONS`.
 
-Status API requirements: Razorpay needs `providerOrderId`, and Stripe needs the `cs_` / `pi_` id (mock mode enforces the same). Others look up by `orderRef`. Skydo (Zoho bridge) costs one Zoho call with `providerOrderId`, two without; Zoho Books allows 1,000 (Free) to 10,000 (Premium and above) calls per day, and a 15-minute poll costs 96 calls a day per open invoice. **Persist `providerOrderId` and `providerPaymentId` next to `orderRef`.**
+Status API requirements: Razorpay needs `providerOrderId`, and Stripe needs the `cs_` / `pi_` id (mock mode enforces the same). Others look up by `orderRef`. Skydo and Infinity (Zoho bridge) cost one Zoho call with `providerOrderId`, two without; Zoho Books allows 1,000 (Free) to 10,000 (Premium and above) calls per day, and a 15-minute poll costs 96 calls a day per open invoice. **Persist `providerOrderId` and `providerPaymentId` next to `orderRef`.**
 
 ## 5. Observability
 
@@ -90,7 +90,7 @@ Symptom: `createPayment` returns `OUTCOME_UNKNOWN` (or `TIMEOUT` / `NETWORK` whe
 2. For gateways keyed by your `orderRef` (Cashfree, PhonePe, Paytm, PayU, CCAvenue), call `getPaymentStatus({ orderRef })`. If the order exists, reuse it. If `NOT_FOUND`, it's safe to create with the **same** orderRef.
 3. For Stripe, retry with the same orderRef / `idempotencyKey`. The `Idempotency-Key` makes the gateway return the original Session.
 4. For Razorpay, retry with the **same** orderRef. Razorpay rejects a second order with the same `receipt` as a duplicate, and the adapter then fetches the existing order by receipt and returns it if amount and currency match (otherwise the original error is thrown). Store the returned `providerOrderId`.
-5. For Skydo with the Zoho bridge, retry with the same orderRef: the adapter finds the existing invoice by reference and returns the full invoice. If a concurrent create made a twin, every process keeps the oldest `invoice_id` and voids only its own losing invoice.
+5. For Skydo or Infinity with the Zoho bridge, retry with the same orderRef: the adapter finds the existing invoice by reference and returns the full invoice. If a concurrent create made a twin, every process keeps the oldest `invoice_id` and voids only its own losing invoice.
 6. A client-layer replay with the same key only returns a stored result if the first call **succeeded**. Failures aren't cached, so step 2 applies.
 
 ### Playbook: UPI payment pending

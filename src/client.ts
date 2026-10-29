@@ -28,7 +28,12 @@ import type {
 } from './core/types.js';
 import { MockGateway, MockLedger } from './mock/mock-gateway.js';
 import { allCapabilities, PROVIDERS } from './providers/index.js';
-import { SKYDO_MIN_USD_CENTS, SkydoGateway, type RecordPaymentInput } from './providers/skydo/adapter.js';
+import { InfinityGateway, validateQuickLink } from './providers/infinity/adapter.js';
+import type { RecordPaymentInput } from './providers/shared/manual-collections.js';
+import { SKYDO_MIN_USD_CENTS, SkydoGateway } from './providers/skydo/adapter.js';
+
+/** Collection services with no sandbox: "sandbox" mode is the merchant's real ledger / books. */
+const NO_SANDBOX: Partial<Record<ProviderId, string>> = { skydo: 'Skydo has no sandbox', infinity: 'Infinity documents no sandbox' };
 
 export interface PaymentsClientOptions {
   config?: Partial<PaymentsConfig>;
@@ -213,6 +218,44 @@ export class PaymentsClient {
     });
   }
 
+  /** Infinity rules, enforced here so mock mode behaves exactly like the real adapter. */
+  private assertInfinityCurrency(currency: string | undefined) {
+    const c = currency?.toUpperCase();
+    if (!c || !/^[A-Z]{3}$/.test(c) || c === 'INR') {
+      throw new PaymentError('VALIDATION', 'Infinity receives foreign currency from abroad: pass the client\'s currency (USD, EUR, GBP, AUD, CAD, ...). INR is not supported.', {
+        provider: 'infinity',
+        hint: 'For domestic INR payments use razorpay, cashfree, payu, phonepe, paytm or ccavenue.',
+      });
+    }
+  }
+
+  private infinity(): InfinityGateway {
+    if (this.config.mode === 'mock') {
+      throw new PaymentError('VALIDATION', 'Mock mode simulates Infinity receipts with payments_mock_complete_payment.', { provider: 'infinity' });
+    }
+    const gw = this.gateway('infinity');
+    if (!(gw instanceof InfinityGateway)) throw new PaymentError('VALIDATION', 'Infinity gateway unavailable.', { provider: 'infinity' });
+    return gw;
+  }
+
+  /**
+   * Infinity: record money the Infinity dashboard shows as received (bank transfer or QuickLink).
+   * Recording a receipt can mark an order paid, so through the MCP server it is gated like a refund.
+   */
+  async infinityRecordPayment(input: RecordPaymentInput, opts: { confirm?: boolean } = {}) {
+    const gw = this.infinity();
+    return this.audited({ action: 'infinity_record_payment', provider: 'infinity', orderRef: input.orderRef, amount: input.amountReceived, detail: { receiptId: input.receiptId } }, async () => {
+      this.assertLiveMutationAllowed('Recording an Infinity receipt', 'infinity', opts.confirm === true);
+      return gw.recordPayment(input);
+    });
+  }
+
+  /** Infinity: orders still waiting for money, oldest first. */
+  async infinityOutstanding() {
+    const gw = this.infinity();
+    return { mode: gw.mode, outstanding: gw.outstanding(), note: gw.mode === 'zoho' ? 'Zoho bridge: outstanding invoices are in Zoho Books (status sent/overdue/partially_paid).' : undefined };
+  }
+
   /** Skydo ledger mode: orders still waiting for money. */
   async skydoOutstanding() {
     const gw = this.skydo();
@@ -238,16 +281,17 @@ export class PaymentsClient {
 
   private assertLiveMutationAllowed(action: string, provider: ProviderId, confirmed: boolean) {
     if (!this.guardLiveMutations || this.config.mode === 'mock') return;
-    // Skydo has no sandbox: "sandbox" Skydo is the merchant's real ledger / Zoho Books, so the gate
-    // applies in every non-mock mode.
-    const realData = this.config.mode === 'live' || provider === 'skydo';
+    // Skydo and Infinity have no sandbox: "sandbox" is the merchant's real ledger / Zoho Books, so the
+    // gate applies in every non-mock mode.
+    const noSandbox = NO_SANDBOX[provider];
+    const realData = this.config.mode === 'live' || noSandbox !== undefined;
     if (!realData) return;
     if (!this.config.allowLiveMutations || !confirmed) {
       throw new PaymentError(
         'LIVE_MUTATION_BLOCKED',
         this.config.mode === 'live'
           ? `${action} on ${provider} in LIVE mode is blocked.`
-          : `${action} on ${provider} is blocked: Skydo has no sandbox, so ${this.config.mode} mode works on real data.`,
+          : `${action} on ${provider} is blocked: ${noSandbox}, so ${this.config.mode} mode works on real data.`,
         { provider, hint: 'Set PAYMENTS_ALLOW_LIVE_MUTATIONS=true on the server AND pass confirm=true on the call after a human has approved it.' },
       );
     }
@@ -292,9 +336,19 @@ export class PaymentsClient {
       });
     }
     if (provider === 'skydo') this.assertSkydoCurrency(input.currency, input.amount);
+    if (provider === 'infinity') {
+      this.assertInfinityCurrency(input.currency);
+      // Mock mode has no adapter to check the link: apply the default host rule here too.
+      if (this.config.mode === 'mock' && input.providerOptions?.quickLinkUrl !== undefined) validateQuickLink(input.providerOptions.quickLinkUrl, ['*.infinityapp.in']);
+    }
     const currency = (input.currency ?? 'INR').toUpperCase();
     this.assertProviderOptions(provider, 'payment', input.providerOptions);
     const gw = this.requireFeature(provider, 'createPayment', 'createPayment');
+    if (provider === 'infinity' && this.config.mode !== 'mock') {
+      // Infinity creates nothing remotely in ledger mode, and its ledger / Zoho lookup is already idempotent
+      // per orderRef; the cache would refuse the supported "attach a QuickLink later" call.
+      return this.audited({ action: 'create_payment', provider, orderRef: input.orderRef, amount: input.amount, currency }, () => gw.createPayment({ ...input, currency }));
+    }
     // Short TTL: the cached result holds checkout tokens/URLs that expire (Paytm txnToken 15 min).
     return this.audited({ action: 'create_payment', provider, orderRef: input.orderRef, amount: input.amount, currency }, () =>
       withIdempotency(

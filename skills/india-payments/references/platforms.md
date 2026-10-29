@@ -16,6 +16,7 @@
 | Paytm | No official app found | UNVERIFIED |
 | Stripe | Not usable for India stores | PARTIAL |
 | Skydo | None | VERIFIED-ABSENT |
+| Infinity | None found (no Infinity Shopify payments app) | UNVERIFIED |
 
 What code *can* do alongside Shopify: a custom app or backend that reads orders (Admin API) and the gateway's API for reconciliation, refund reporting, or sending payment links for draft/B2B orders. Refunds should normally be issued **from Shopify admin** so Shopify's order state stays correct; refunding directly in the gateway desynchronises Shopify.
 

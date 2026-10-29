@@ -146,6 +146,17 @@ const P: Record<ProviderId, ProviderProfile> = {
     ],
     trustNote: 'Skydo has no public API or webhooks: status comes from the Zoho invoice Skydo marks paid, or from receipts an admin records in the ledger.',
   },
+  infinity: {
+    returnStyle: [],
+    webhookEvents: { checkout: [], refunds: [], subscriptions: [] },
+    dashboardSteps: [
+      'Infinity dashboard: complete KYC and add the bank account where INR settlements should land.',
+      'Copy your receiving account details (USD, EUR, GBP, AUD, CAD local accounts and SWIFT) into INFINITY_RECEIVING_ACCOUNTS, or set INFINITY_QUICKLINK_ONLY=true.',
+      'QuickLinks (optional): Create invoice > Payment details > Credit card, with your order id as the invoice number and the same amount and currency; copy the generated link.',
+      'Download the FIRA for each settled payment from the dashboard (open the payment > Download FIRA) for GST/export compliance.',
+    ],
+    trustNote: 'Infinity publishes no API or webhooks: status comes only from receipts an admin records after checking the Infinity dashboard.',
+  },
 };
 
 export function profileFor(provider: ProviderId): ProviderProfile {

@@ -20,6 +20,8 @@ const PRIORS: Partial<Record<ProviderId, Partial<Record<Need, number>>>> = {
   cashfree: { fast_integration: 2 },
   stripe: { international: 3, fast_integration: 2 },
   skydo: { exporter_collections: 5 },
+  // Same use case as Skydo; its Zoho integration is undocumented, so Skydo stays first.
+  infinity: { exporter_collections: 3 },
   phonepe: { upi: 2 },
   paytm: { upi: 1 },
   ccavenue: { international: 1 },
@@ -70,7 +72,7 @@ function scoreNeed(cap: ProviderCapabilities, need: Need): number {
     case 'mobile_sdk':
       return Object.keys(cap.officialSdks).some((k) => /android|ios|react|flutter/i.test(k)) ? 2 : 0;
     case 'exporter_collections':
-      return cap.provider === 'skydo' ? 2 : 0;
+      return cap.provider === 'skydo' || cap.provider === 'infinity' ? 2 : 0;
     case 'fast_integration':
       return cap.checkoutTypes.includes('js_sdk') ? 2 : cap.checkoutTypes.includes('redirect') ? 1 : 0;
   }

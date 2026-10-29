@@ -42,7 +42,7 @@ describe('MCP server over stdio (mock mode)', () => {
     await client?.close();
   });
 
-  it('lists exactly the 19 documented tools, resources and the prompt', async () => {
+  it('lists exactly the 21 documented tools, resources and the prompt', async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
       [
@@ -51,6 +51,7 @@ describe('MCP server over stdio (mock mode)', () => {
         'payments_get_refund_status', 'payments_verify_webhook', 'payments_simulate_webhook', 'payments_create_customer',
         'payments_create_subscription', 'payments_cancel_subscription', 'payments_list_settlements',
         'payments_generate_integration', 'payments_mock_complete_payment', 'payments_skydo_record_payment', 'payments_skydo_outstanding',
+        'payments_infinity_record_payment', 'payments_infinity_outstanding',
       ].sort(),
     );
     for (const t of tools) expect(t.description && t.description.length > 20).toBe(true);
@@ -64,7 +65,7 @@ describe('MCP server over stdio (mock mode)', () => {
 
   it('discovery tools', async () => {
     const list = await call(client, 'payments_list_providers', {});
-    expect(list.data.providers).toHaveLength(8);
+    expect(list.data.providers).toHaveLength(9);
     const caps = await call(client, 'payments_get_capabilities', { provider: 'skydo' });
     expect(caps.data.features.createPayment.support).toBe('partial');
     expect(caps.data.features.webhooks.support).toBe('unsupported');
@@ -165,7 +166,7 @@ describe('MCP server over stdio (mock mode)', () => {
     const skydoRefund = await call(client, 'payments_refund', { provider: 'skydo', order_ref: 'sky_1', refund_ref: 'rf_sky_1' });
     expect(skydoRefund).toMatchObject({ isError: true, data: { error: 'UNSUPPORTED' } });
     // The server is still alive afterwards.
-    expect((await call(client, 'payments_list_providers', {})).data.providers).toHaveLength(8);
+    expect((await call(client, 'payments_list_providers', {})).data.providers).toHaveLength(9);
   });
 });
 
@@ -209,7 +210,7 @@ describe('MCP server over Streamable HTTP', () => {
       const client = new Client({ name: 'e2e-http', version: '0' });
       await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
       const { tools } = await client.listTools();
-      expect(tools).toHaveLength(19);
+      expect(tools).toHaveLength(21);
       const created = await call(client, 'payments_create_payment', { provider: 'cashfree', order_ref: 'http_1', amount: 100 });
       expect(created.data.status).toBe('created');
       await client.close();

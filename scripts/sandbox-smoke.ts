@@ -164,7 +164,7 @@ async function smokePaid(spec: string) {
 }
 
 const wanted = process.argv.slice(2).filter((a) => (PROVIDER_IDS as readonly string[]).includes(a)) as ProviderId[];
-const providers = wanted.length ? wanted : PROVIDER_IDS.filter((p) => p !== 'skydo');
+const providers = wanted.length ? wanted : PROVIDER_IDS.filter((p) => p !== 'skydo' && p !== 'infinity');
 
 console.log(`Sandbox smoke test (${providers.join(', ')})\n`);
 for (const p of providers) await smoke(p);

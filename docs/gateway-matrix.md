@@ -8,24 +8,24 @@ Support levels: **Yes** = supported, **Partial** = implemented with caveats, **P
 
 ## 1. At a glance
 
-| | Razorpay | PayU | Cashfree | CCAvenue | Paytm | PhonePe | Stripe | Skydo |
-|---|---|---|---|---|---|---|---|---|
-| Checkout type | `js_sdk` (Checkout.js), redirect via `callback_url` | `form_post` | `js_sdk` (cashfree.js v3) | `form_post` (encrypted) | `js_sdk` (merchant JS), `form_post` fallback | `redirect` | `redirect` (Checkout Session) or `js_sdk` (Payment Element) | `manual` (Zoho invoice link or bank-transfer instructions) |
-| Gateway amount unit | paise int | rupee string `"499.00"` | rupee number `499.00` | rupee string | rupee string | paise int | paise int | minor units of the invoice currency; Zoho invoices take decimal major units |
-| API auth | Basic `key_id:key_secret` | none (SHA-512 hash with salt) | `x-client-id` / `x-client-secret` / `x-api-version` | AES-encrypted `enc_request` + `access_code`, IP whitelist | Paytm checksum in `head.signature` | OAuth `client_credentials` → `O-Bearer` | Bearer secret key | no Skydo API. Zoho bridge: Zoho OAuth refresh token |
+| | Razorpay | PayU | Cashfree | CCAvenue | Paytm | PhonePe | Stripe | Skydo | Infinity |
+|---|---|---|---|---|---|---|---|---|---|
+| Checkout type | `js_sdk` (Checkout.js), redirect via `callback_url` | `form_post` | `js_sdk` (cashfree.js v3) | `form_post` (encrypted) | `js_sdk` (merchant JS), `form_post` fallback | `redirect` | `redirect` (Checkout Session) or `js_sdk` (Payment Element) | `manual` (Zoho invoice link or bank-transfer instructions) | `manual` (Zoho invoice link, QuickLink or bank-transfer instructions) |
+| Gateway amount unit | paise int | rupee string `"499.00"` | rupee number `499.00` | rupee string | rupee string | paise int | paise int | minor units of the invoice currency; Zoho invoices take decimal major units | minor units of the invoice currency; Zoho invoices take decimal major units |
+| API auth | Basic `key_id:key_secret` | none (SHA-512 hash with salt) | `x-client-id` / `x-client-secret` / `x-api-version` | AES-encrypted `enc_request` + `access_code`, IP whitelist | Paytm checksum in `head.signature` | OAuth `client_credentials` → `O-Bearer` | Bearer secret key | no Skydo API. Zoho bridge: Zoho OAuth refresh token | no Infinity API. Zoho bridge: Zoho OAuth refresh token |
 | Callback verification | HMAC-SHA256 (`order_id\|payment_id`, with the order id you stored) | SHA-512 reverse hash | status API (unsigned return) | decrypt `encResp` (+ status API) | `CHECKSUMHASH` | status API (unsigned redirect) | status API (unsigned redirect) | no callback: reads the Zoho invoice or the ledger |
-| `verifiedVia` | `signature` | `signature` | `status_api` | `decryption`, upgraded to `status_api` by `PaymentsClient` | `signature` | `status_api` | `status_api` | `status_api` (Zoho) / `manual_record` (ledger) |
-| Webhook auth | `X-Razorpay-Signature` HMAC(raw body) | reverse hash in body | `x-webhook-signature` HMAC(ts + raw body); accepts timestamps up to 24 h old | decrypts `encResp` (cbc: no MAC; gcm: auth tag) | `CHECKSUMHASH` in form (payments); `head.signature` (refunds) | `Authorization: sha256(user:pass)` (body **not** signed) | `Stripe-Signature` t/v1 HMAC, 300 s tolerance | none (no webhooks) |
-| Refunds | Yes (normal / optimum) | Yes | Yes (STANDARD / INSTANT) | Partial | Yes | Yes | Yes (no instant) | No |
-| Refund status | Yes | Yes | Yes | Planned | Yes | Yes | Yes | No |
-| Customers | Yes | No | Planned | No | No | No | Yes | No |
-| Subscriptions | Yes | Planned | Planned | Planned | Planned | Planned | Partial | No |
-| Settlements | Yes | Planned | Planned | Planned | Planned | Planned | Partial (payouts) | No |
-| Payouts | Planned (RazorpayX) | Planned | Planned | Planned | Planned | No | Planned (Connect) | No |
-| Payment links | Planned | Planned | Planned | Planned | Planned | Planned | Planned | No (dashboard only) |
-| Currencies | INR + international (if enabled) | INR (intl. on a separate account) | INR (+ intl. if enabled) | INR + many | INR only | INR only | 135+ presentment | USD, GBP, EUR, CAD, AUD, AED, SGD local + SWIFT; **not INR** |
-| Shopify | Official payment provider | Listed payment provider | No-code integration advertised (PARTIAL) | Historically listed (UNVERIFIED) | None found | Official app | Not for India stores | None |
-| WooCommerce | Official plugin | Plugin | n/a in map | Plugin via dashboard | n/a in map | Official plugin | Official plugin | n/a |
+| `verifiedVia` | `signature` | `signature` | `status_api` | `decryption`, upgraded to `status_api` by `PaymentsClient` | `signature` | `status_api` | `status_api` | `status_api` (Zoho) / `manual_record` (ledger) | `status_api` (Zoho) / `manual_record` (ledger) |
+| Webhook auth | `X-Razorpay-Signature` HMAC(raw body) | reverse hash in body | `x-webhook-signature` HMAC(ts + raw body); accepts timestamps up to 24 h old | decrypts `encResp` (cbc: no MAC; gcm: auth tag) | `CHECKSUMHASH` in form (payments); `head.signature` (refunds) | `Authorization: sha256(user:pass)` (body **not** signed) | `Stripe-Signature` t/v1 HMAC, 300 s tolerance | none (no webhooks) | none (no webhooks) |
+| Refunds | Yes (normal / optimum) | Yes | Yes (STANDARD / INSTANT) | Partial | Yes | Yes | Yes (no instant) | No | No |
+| Refund status | Yes | Yes | Yes | Planned | Yes | Yes | Yes | No | No |
+| Customers | Yes | No | Planned | No | No | No | Yes | No | No |
+| Subscriptions | Yes | Planned | Planned | Planned | Planned | Planned | Partial | No | No |
+| Settlements | Yes | Planned | Planned | Planned | Planned | Planned | Partial (payouts) | No | No |
+| Payouts | Planned (RazorpayX) | Planned | Planned | Planned | Planned | No | Planned (Connect) | No | No |
+| Payment links | Planned | Planned | Planned | Planned | Planned | Planned | Planned | No (dashboard only) | No (QuickLinks are dashboard-only) |
+| Currencies | INR + international (if enabled) | INR (intl. on a separate account) | INR (+ intl. if enabled) | INR + many | INR only | INR only | 135+ presentment | USD, GBP, EUR, CAD, AUD, AED, SGD local + SWIFT; **not INR** | USD, EUR, GBP, AUD, CAD local + SWIFT; **not INR** |
+| Shopify | Official payment provider | Listed payment provider | No-code integration advertised (PARTIAL) | Historically listed (UNVERIFIED) | None found | Official app | Not for India stores | None | None |
+| WooCommerce | Official plugin | Plugin | n/a in map | Plugin via dashboard | n/a in map | Official plugin | Official plugin | n/a | n/a |
 
 ---
 
@@ -142,6 +142,16 @@ Full guide: [skydo.md](skydo.md).
 - **Receiving accounts + ledger** (`SKYDO_RECEIVING_ACCOUNTS`): `createPayment` returns bank-transfer instructions for the account matching the currency (or the `"*"` fallback), with the orderRef as payment reference, and adds an entry to a JSON ledger (`SKYDO_LEDGER_FILE`). Receipts are recorded with `payments_skydo_record_payment` after a human checks them (idempotent per `receipt_id`, compared case-insensitively and unique across orders; `received_at` ISO 8601 and not in the future; sandbox and live need the double gate, since Skydo has no sandbox); short receipts stay `pending`. The ledger file is locked per change (async, owner-checked, fsynced; local disk only), so your app and the MCP server can share it.
 - **Rules**: `currency` is required and INR is rejected; USD payments must be at least USD 50 (`5000`), other currencies the equivalent (not enforced). No refunds, webhooks, customers, subscriptions, settlements, payouts or API payment links (InstaLinks are dashboard-only and single-use). No Skydo sandbox: `sandbox` mode with `ZOHO_*` set creates real Zoho invoices, and receipt recording is gated as in live.
 - **Recommendation**: Skydo for bank-transfer invoices; for card payments from international customers, a gateway that offers them (Razorpay International, PayU, CCAvenue, or Stripe, which is invite-only in India). `payments_recommend_gateway` with `exporter_collections` surfaces this.
+
+## 9a. Infinity
+
+Full guide: [infinity.md](infinity.md). Sources: [research/verification/infinity-api-search.md](research/verification/infinity-api-search.md).
+
+- **No public developer API docs, SDK or webhooks** (checked 2026-10-29). The Terms mention an API, but no documentation is public, and they forbid reverse engineering and incorporating the Services into other systems. The adapter never contacts Infinity.
+- **What it is**: cross-border collections (Scalifi Wealth Pvt Ltd): local receiving accounts in USD, EUR, GBP, AUD and CAD, SWIFT for other currencies, QuickLink payment links (card or bank transfer), a flat 0.5% fee, INR settlement within about 24 hours, and a FIRA per settled payment.
+- **Zoho Books bridge** (all `INFINITY_ZOHO_*` variables, separate from Skydo's `ZOHO_*`): the shared Skydo bridge code. It creates the invoice with `reference_number` = orderRef and reads the status back; an invoice is paid only when Zoho payments cover the total. Infinity's dashboard lists a Zoho Books integration (Connect tab), but what it syncs is undocumented, so confirm it with one real invoice.
+- **Bank transfer** (`INFINITY_RECEIVING_ACCOUNTS`) and **QuickLink** (`providerOptions.quickLinkUrl`, https on `INFINITY_QUICKLINK_HOSTS` only, default *.infinityapp.in): payments are tracked in a ledger (`INFINITY_LEDGER_FILE`), and receipts are recorded with `payments_infinity_record_payment` (same rules as Skydo).
+- **Rules**: `currency` is required and INR is rejected; no minimum is documented, so none is enforced. There are no refunds, webhooks, customers, subscriptions, settlements, payouts or payment-link API. Infinity documents no sandbox, so receipt recording is gated in `sandbox` too.
 
 ---
 

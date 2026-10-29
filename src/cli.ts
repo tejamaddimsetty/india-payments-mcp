@@ -52,7 +52,7 @@ function doctor() {
       try {
         client.gateway(id);
       } catch (e) {
-        // CONFIG_MISSING from a gateway with no single required variable (Skydo) = not set up yet.
+        // CONFIG_MISSING from a gateway with no single required variable (Skydo, Infinity) = not set up yet.
         if (e instanceof PaymentError && e.code === 'CONFIG_MISSING') {
           status = 'not configured';
           setup = [e.message, e.hint].filter(Boolean).join(' ');

@@ -1,6 +1,6 @@
 # Payment rules, test plan, go-live checklist
 
-Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Skydo). Each rule below prevents a real-money bug.
+Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Skydo, Infinity). Each rule below prevents a real-money bug.
 
 ## Non-negotiable rules
 
@@ -29,6 +29,7 @@ Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, Phon
 | PhonePe v2 | none: Order Status API | `Authorization` = hex sha256(`username:password`), does NOT cover body: re-fetch status |
 | Stripe | n/a (fulfil on webhook) | `Stripe-Signature` t,v1: hex HMAC-SHA256(`t.body`, whsec), check every v1, 300 s tolerance |
 | Skydo | no API and no callback: status from the Zoho Books invoice Skydo marks paid, or from receipts you record in the ledger | none (Skydo emails/WhatsApps you) |
+| Infinity | no API and no callback: status from the Zoho Books invoice (only if Infinity's Zoho integration records the payment: confirm during setup), or from receipts you record in the ledger after checking the Infinity dashboard | none (Infinity notifies you in its app/dashboard) |
 
 ## Test plan
 
@@ -51,4 +52,4 @@ Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, Phon
 
 ## Things only the human can do
 
-Merchant signup and KYC; get keys; register webhook URL + secret; enable payment methods; whitelist domain/IP; enable auto-capture; install the official Shopify app (Shopify needs no code and cannot take custom gateways); request a Stripe India invite; connect Skydo to Zoho Books or copy Skydo receiving-account details, and confirm Skydo receipts in its dashboard; approve live refunds.
+Merchant signup and KYC; get keys; register webhook URL + secret; enable payment methods; whitelist domain/IP; enable auto-capture; install the official Shopify app (Shopify needs no code and cannot take custom gateways); request a Stripe India invite; connect Skydo to Zoho Books or copy Skydo receiving-account details, and confirm Skydo receipts in its dashboard; connect Infinity to Zoho Books (then confirm with a first real invoice) or copy Infinity receiving-account details and/or create QuickLinks, and confirm Infinity receipts in its dashboard; approve live refunds.

@@ -4,7 +4,7 @@ Instructions for coding agents (Claude Code, Codex, Cursor, Copilot, etc.) worki
 
 ## What this is
 
-`india-payments-mcp`: an MCP server and TypeScript SDK that puts Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe and Skydo behind one interface. Node ≥ 20, ESM, TypeScript, zero runtime dependencies beyond `@modelcontextprotocol/sdk` and `zod`. Gateways are called with plain `fetch`, never vendor SDKs.
+`india-payments-mcp`: an MCP server and TypeScript SDK that puts Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Skydo and Infinity behind one interface. Node ≥ 20, ESM, TypeScript, zero runtime dependencies beyond `@modelcontextprotocol/sdk` and `zod`. Gateways are called with plain `fetch`, never vendor SDKs.
 
 ## Layout
 
@@ -23,6 +23,7 @@ src/
   providers/<id>/
     capabilities.ts        the capability map: source of truth for what works
     adapter.ts             the gateway implementation (ProviderModule)
+  providers/shared/        code shared by the no-API collection adapters (Skydo, Infinity): receiving accounts, ledger, manual collections, Zoho Books bridge
   providers/index.ts       registry
   mock/mock-gateway.ts     network-free gateway used when PAYMENTS_MODE=mock
   webhooks/handler.ts      framework-agnostic verify → dedupe → handle
@@ -51,14 +52,14 @@ Run `npm test` and `npm run typecheck` before declaring any change done.
 
 ## Rules
 
-1. **Never fake support.** If a gateway does not offer a feature, its capability is `unsupported` and the adapter does not implement it. If it offers it but we have not built it, `not_implemented`. Do not return synthetic success, stub data or a guessed endpoint. Skydo has no API: the adapter never calls Skydo, it automates Skydo's Zoho Books integration or a local ledger (`partial` create/verify/status), and everything else is `unsupported`.
+1. **Never fake support.** If a gateway does not offer a feature, its capability is `unsupported` and the adapter does not implement it. If it offers it but we have not built it, `not_implemented`. Do not return synthetic success, stub data or a guessed endpoint. Skydo has no API: the adapter never calls Skydo, it automates Skydo's Zoho Books integration or a local ledger (`partial` create/verify/status), and everything else is `unsupported`. Infinity is the same: the adapter never calls Infinity (no public API; its Terms forbid reverse engineering) and automates a Zoho Books bridge or a ledger fed by receiving-account details and/or a QuickLink the merchant created in the dashboard.
 2. **The capability map is the source of truth.** `providers/<id>/capabilities.ts` drives `PaymentsClient` gating, `payments_list_providers`, `payments_recommend_gateway`, the support matrix, and docs. When you implement or remove a feature, update the map in the same change. A method that exists on the adapter while the map says `not_implemented` is still refused by the client.
 3. **Facts come from `docs/research/gateway-api-facts.md` or an official URL.** Cite the URL in a code comment or the capability `notes` for anything non-obvious (endpoints, signature formats, field limits). If you cannot verify a fact, mark it UNVERIFIED in comments and keep it configurable. Do not "fix" a documented algorithm from memory.
-4. **Keep adapters isolated.** An adapter imports only from `src/core/*` and its own folder. No adapter imports another adapter. Gateway-specific logic never leaks into `client.ts`, `mcp/server.ts` or `codegen/` beyond what the capability map exposes.
+4. **Keep adapters isolated.** An adapter imports only from `src/core/*`, its own folder and `src/providers/shared/*` (no-API collection code used by Skydo and Infinity). No adapter imports another adapter. Gateway-specific logic never leaks into `client.ts`, `mcp/server.ts` or `codegen/` beyond what the capability map exposes.
 5. **Amounts are integer minor units of the currency at every public boundary** (paise for INR, cents for USD). Conversion to rupees/strings happens inside the adapter via `core/money.ts`. Never use floating-point arithmetic on money.
 6. **Verification is constant-time and on raw bytes.** Use `core/crypto.ts` helpers. Webhook verification takes the raw body string; never re-serialise parsed JSON.
 7. **Secrets never leave the process.** Not in tool results, errors, logs, audit entries or `raw` payloads. `payments_check_config` reports presence only.
-8. **Live-mode safety rails stay.** Refunds and subscription cancellations in live mode, and Skydo receipt recording in every non-mock mode (Skydo has no sandbox), require `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and `confirm=true`. Webhook simulation is disabled in live mode. `paid` stays `captured` / `partially_refunded` only. Do not weaken these.
+8. **Live-mode safety rails stay.** Refunds and subscription cancellations in live mode, and Skydo/Infinity receipt recording in every non-mock mode (Skydo has no sandbox and Infinity documents none; `NO_SANDBOX` in `client.ts`), require `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and `confirm=true`. Webhook simulation is disabled in live mode. `paid` stays `captured` / `partially_refunded` only. Do not weaken these.
 9. **Tests never hit the network.** Inject `fetch` and the clock through `AdapterContext`. Use recorded/fixture payloads; signature tests must include a tampered-body case and a wrong-secret case.
 10. **Do not add runtime dependencies** without a strong reason. No vendor SDKs.
 

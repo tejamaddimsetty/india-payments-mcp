@@ -62,7 +62,7 @@ describe('generateIntegration: every provider x framework', () => {
 });
 
 describe('server code', () => {
-  const serverCombos = PROVIDER_IDS.filter((p) => p !== 'skydo').flatMap((provider) => SERVER_FRAMEWORKS.map((framework) => ({ provider, framework })));
+  const serverCombos = PROVIDER_IDS.filter((p) => p !== 'skydo' && p !== 'infinity').flatMap((provider) => SERVER_FRAMEWORKS.map((framework) => ({ provider, framework })));
 
   it.each(serverCombos)('$provider / $framework imports the SDK and never trusts a client amount', ({ provider, framework }) => {
     const r = generateIntegration({ provider, framework, features: [...ALL_FEATURES] });
@@ -144,7 +144,7 @@ describe('browser checkout', () => {
   });
 
   it('plain JS output has no TypeScript syntax left in it', () => {
-    for (const provider of PROVIDER_IDS.filter((p) => p !== 'skydo')) {
+    for (const provider of PROVIDER_IDS.filter((p) => p !== 'skydo' && p !== 'infinity')) {
       const js = code(generateIntegration({ provider, framework: 'html' }).files.find((f) => f.path.endsWith('.js'))!.contents);
       expect(js, provider).not.toMatch(/\bas (any|[A-Z]\w*)\b|<CheckoutOutcome>|<void>|: (string|unknown|Record<)|\binterface\b|^type /m);
     }
@@ -174,7 +174,7 @@ describe('honest special cases', () => {
     expect(r.files.some((f) => /skydo-routes\.ts$|app\/api\/skydo\//.test(f.path))).toBe(true);
   });
 
-  it.each(PROVIDER_IDS.filter((p) => p !== 'skydo'))('shopify / %s warns about approved apps and Shopify Payments in India', (provider) => {
+  it.each(PROVIDER_IDS.filter((p) => p !== 'skydo' && p !== 'infinity'))('shopify / %s warns about approved apps and Shopify Payments in India', (provider) => {
     const r = generateIntegration({ provider, framework: 'shopify' });
     const w = r.warnings.join(' ');
     expect(w).toMatch(/approved payment apps/);

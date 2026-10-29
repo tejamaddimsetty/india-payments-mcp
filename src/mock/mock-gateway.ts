@@ -73,7 +73,7 @@ const REFUND_NEEDS_PROVIDER_PAYMENT_ID: ReadonlySet<ProviderId> = new Set(['razo
 /** Real gateway rejects a reused refund reference instead of returning the earlier refund. */
 const REFUND_DUPLICATE_REJECTED: ReadonlySet<ProviderId> = new Set(['razorpay', 'payu', 'ccavenue']);
 /** Real verifyPayment is a server-side status lookup (unsigned redirect), not a signed callback. */
-const VERIFY_BY_STATUS_LOOKUP: ReadonlySet<ProviderId> = new Set(['skydo', 'cashfree', 'phonepe', 'stripe']);
+const VERIFY_BY_STATUS_LOOKUP: ReadonlySet<ProviderId> = new Set(['skydo', 'infinity', 'cashfree', 'phonepe', 'stripe']);
 
 /** Shared across all mock gateways in a process so the MCP server keeps state between tool calls. */
 export class MockLedger {

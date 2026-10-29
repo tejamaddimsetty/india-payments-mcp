@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-29
+
+### Added
+
+- **Infinity adapter** (infinityapp.in, provider id `infinity`). Infinity publishes no API docs or webhooks, and its Terms forbid reverse engineering, so the adapter never contacts Infinity. See [docs/infinity.md](docs/infinity.md) and the sources in [infinity-api-search.md](docs/research/verification/infinity-api-search.md).
+  - Zoho Books bridge (`INFINITY_ZOHO_*`, separate from Skydo's `ZOHO_*`) for Infinity's Zoho Books integration (dashboard Connect tab). It uses the same bridge code as Skydo: an invoice counts as paid only when Zoho payments cover the total. What Infinity syncs is undocumented, so confirm with one real invoice.
+  - Bank transfer (`INFINITY_RECEIVING_ACCOUNTS`) and QuickLinks (`providerOptions.quickLinkUrl`). Only `https` links on `INFINITY_QUICKLINK_HOSTS` (default `infinityapp.in` and subdomains), with no credentials or port, are accepted. One link per order; `INFINITY_QUICKLINK_ONLY=true` for link-only use.
+  - Ledger with idempotent receipts, the same rules as Skydo's ledger mode. Recording is gated in the MCP server in `sandbox` and `live` (Infinity documents no sandbox).
+  - `currency` required and INR rejected in every mode, including mock. No minimum is documented, so none is enforced.
+- MCP tools `payments_infinity_record_payment` and `payments_infinity_outstanding` (21 tools), and SDK methods `PaymentsClient.infinityRecordPayment` and `infinityOutstanding`.
+- Integration code generator for Infinity (Express, Fastify and Next.js; admin-only invoice and receipt routes; Zoho polling) and `docs/INFINITY_PAYMENTS.md`.
+- Recommender: `exporter_collections` ranks Skydo first, then Infinity.
+- Adversarial review of Infinity ([infinity-review.md](docs/research/verification/infinity-review.md)): no critical or high findings. The medium and low findings are fixed with regression tests: no QuickLink in Zoho mode, no new link on a paid or cancelled order, gateway-tagged ledger files, `INFINITY_ZOHO_*` names in Zoho error hints, `INFINITY_QUICKLINK_ONLY` exclusive, exact-or-`*.` host matching without IPs or public-suffix wildcards, the same link check in mock mode, and no 10-minute create cache for Infinity (its ledger and Zoho lookup are idempotent already).
+
+### Changed
+
+- Ledger files now record the owning gateway (`"provider"`). An untagged file written by 0.2.0 is read as Skydo's, and a file that belongs to another gateway is refused with `CONFIG_INVALID`, so Skydo and Infinity can never share one.
+- Skydo's ledger, receiving-account and Zoho Books code moved to `src/providers/shared/` (`ledger.ts`, `accounts.ts`, `manual-collections.ts`, `zoho.ts`, `zoho-bridge.ts`) and is now shared by Skydo and Infinity. Skydo's behaviour and messages are unchanged (all 57 Skydo tests pass unmodified, and a before/after run of 28 ledger steps, 9 config errors and 4 Zoho scenarios matched, including every HTTP request); the old `src/providers/skydo/{ledger,accounts,zoho}.ts` paths re-export the shared modules.
+- The live-mutation gate applies in `sandbox` to every gateway without a sandbox (Skydo, Infinity).
+
 ## [0.2.0] - 2026-10-29
 
 ### Added

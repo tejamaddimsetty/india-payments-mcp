@@ -6,7 +6,7 @@ A Claude Agent Skill that makes an agent build Indian payment integrations the w
 skills/india-payments/
   SKILL.md                                   # the operating procedure (loaded when triggered)
   references/
-    razorpay.md payu.md cashfree.md ccavenue.md paytm.md phonepe.md stripe.md skydo.md
+    razorpay.md payu.md cashfree.md ccavenue.md paytm.md phonepe.md stripe.md skydo.md infinity.md
     payment-module-architecture.md           # tables, state machine, reconciliation, idempotency
     platforms.md                             # Shopify, WooCommerce, Next.js, Django, Laravel, mobile
 ```
@@ -61,9 +61,9 @@ Claude Desktop / Cursor / any stdio client (`mcpServers` config):
 }
 ```
 
-Modes: `mock` (no network, no credentials, use this first), `sandbox` (gateway test endpoints, test keys), `live` (real money; refunds, cancellations and Skydo receipt recording additionally need `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and `confirm=true` per call after a human approves). Skydo has no sandbox, so its receipt recording needs the same gate in `sandbox` too. Do not give an agent a live-mode server unless you mean it. Check your setup with `npx india-payments-mcp doctor`.
+Modes: `mock` (no network, no credentials, use this first), `sandbox` (gateway test endpoints, test keys), `live` (real money; refunds, cancellations and Skydo/Infinity receipt recording additionally need `PAYMENTS_ALLOW_LIVE_MUTATIONS=true` and `confirm=true` per call after a human approves). Skydo and Infinity have no sandbox, so their receipt recording needs the same gate in `sandbox` too. Do not give an agent a live-mode server unless you mean it. Check your setup with `npx india-payments-mcp doctor`.
 
-Tools the skill uses: `payments_recommend_gateway`, `payments_get_capabilities`, `payments_check_config`, `payments_generate_integration`, `payments_create_payment`, `payments_mock_complete_payment`, `payments_verify_payment`, `payments_get_status`, `payments_simulate_webhook`, `payments_refund`, `payments_get_refund_status`, and for Skydo ledger mode `payments_skydo_record_payment` and `payments_skydo_outstanding`. SKILL.md lists all 19 server tools.
+Tools the skill uses: `payments_recommend_gateway`, `payments_get_capabilities`, `payments_check_config`, `payments_generate_integration`, `payments_create_payment`, `payments_mock_complete_payment`, `payments_verify_payment`, `payments_get_status`, `payments_simulate_webhook`, `payments_refund`, `payments_get_refund_status`, for Skydo ledger mode `payments_skydo_record_payment` and `payments_skydo_outstanding`, and for Infinity `payments_infinity_record_payment` and `payments_infinity_outstanding`. SKILL.md lists all 21 server tools.
 
 ## Other agents
 

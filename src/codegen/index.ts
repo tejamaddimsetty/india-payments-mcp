@@ -13,6 +13,7 @@ import type { ProviderId } from '../core/types.js';
 import { PROVIDERS } from '../providers/index.js';
 import { jsSdkFor, startCheckoutModule } from './templates/browser.js';
 import { mobileGuide, otherSpec, shopifyGuide, shopifyReconcileServer } from './templates/docs.js';
+import { infinityFiles, infinityGuide } from './templates/infinity.js';
 import { skydoFiles, skydoGuide } from './templates/skydo.js';
 import { expressFiles } from './templates/express.js';
 import { fastifyFiles } from './templates/fastify.js';
@@ -59,6 +60,7 @@ export function generateIntegration(opts: GenerateIntegrationOptions): Generated
   const ctx: TemplateContext = { cap, features, orderRefField: profileFor(cap.provider).orderRefField };
 
   if (cap.provider === 'skydo') return skydo(ctx, opts.framework, warnings);
+  if (cap.provider === 'infinity') return infinity(ctx, opts.framework, warnings);
   if (opts.framework === 'shopify') return shopify(ctx, warnings);
 
   const files: GeneratedFile[] = [];
@@ -224,6 +226,34 @@ function skydo(ctx: TemplateContext, framework: Framework, warnings: string[]): 
       'Ledger mode: set SKYDO_RECEIVING_ACCOUNTS, create an invoice, check the instructions show the right account for the currency and the order id as reference; record a short receipt with a receiptId (stays pending), repeat it (no change), then record the rest with another receiptId (captured).',
       'Zoho bridge: create one real invoice for a test client in Zoho, confirm it appears in the Skydo dashboard within ~10 minutes, then have a small real payment (>= USD 50) sent and confirm Zoho shows it paid with the FIRA attached and pollUnpaid() fulfils it.',
       'Restart the server and confirm the ledger file kept its state.',
+    ],
+    warnings,
+  };
+}
+
+function infinity(ctx: TemplateContext, framework: Framework, warnings: string[]): GeneratedIntegration {
+  const { cap } = ctx;
+  warnings.push(
+    'Infinity publishes no developer API, SDK or webhooks. The generated code never calls Infinity: it uses Infinity\'s Zoho Books integration (confirm during setup that Infinity marks invoices paid in Zoho) or hands clients your Infinity receiving-account details and/or a QuickLink you created in the dashboard, with an admin recording each receipt. There is no website checkout, no INR, no UPI and no API refunds.',
+  );
+  if (framework === 'shopify') warnings.push('Infinity has no Shopify payments app; this is a standalone invoicing backend.');
+  const env = envFile(ctx);
+  env.contents += '\n# Admin token for creating invoices and recording receipts. Replace with your real auth.\nADMIN_API_TOKEN=\n';
+  return {
+    provider: cap.provider,
+    framework,
+    summary:
+      'Infinity export collections: a Zoho Books invoice for Infinity\'s Zoho integration (status polled from Zoho), or bank-transfer instructions and/or your QuickLink tracked in a ledger with admin routes to record receipts.',
+    files: [...infinityFiles(framework), env, { path: 'docs/INFINITY_PAYMENTS.md', language: 'markdown', contents: infinityGuide(cap) }],
+    envVars: [...envVarsFor(ctx), 'ADMIN_API_TOKEN'],
+    dashboardSteps: dashboardStepsFor(cap, ctx.features),
+    testChecklist: [
+      'PAYMENTS_MODE=mock: POST /api/infinity/invoices (admin), then payments_mock_complete_payment (provider infinity), then POST /api/infinity/invoices/:orderRef/refresh (admin) -> captured and onPaid runs once.',
+      'Set INFINITY_RECEIVING_ACCOUNTS, create an invoice, check the instructions show the right account for the currency and the order id as reference.',
+      'Pass a QuickLink copied from the Infinity dashboard: it must be accepted; a link on another host must be rejected.',
+      'Record a short receipt with a receiptId (stays pending), repeat it (no change), then record the rest with another receiptId (captured). Restart and confirm the ledger kept its state.',
+      'Zoho bridge: connect Zoho Books in the Infinity dashboard (Connect tab), create one real invoice, have a small real payment sent, and confirm Zoho shows it paid and pollUnpaid() fulfils it. If Infinity does not mark it paid in Zoho, use ledger mode.',
+      'Ledger mode, first real payment: send a small real invoice, wait for the Infinity dashboard to show it received, record it, and download the FIRA once settled.',
     ],
     warnings,
   };
