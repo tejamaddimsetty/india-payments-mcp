@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-30
+
+No code changes; package metadata and README only.
+
+### Changed
+
+- npm description and keywords now include Dodo Payments and Infinity (plus `zoho-books`, `payment-gateway`).
+- README: npm version, downloads, CI and licence badges, and a link to the npm package.
+
 ## [0.4.0] - 2026-10-29
 
 ### Fixed
