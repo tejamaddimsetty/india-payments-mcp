@@ -1,16 +1,16 @@
 # Payment rules, test plan, go-live checklist
 
-Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Skydo, Infinity). Each rule below prevents a real-money bug.
+Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Dodo Payments, Skydo, Infinity). Each rule below prevents a real-money bug.
 
 ## Non-negotiable rules
 
 1. **Amount from the server.** Price from server-side cart/plan data. The client sends an item or plan id, never an amount, currency or price.
-2. **Integer minor units internally** (paise for INR, cents for USD). `amount_paise BIGINT`. Convert only at the gateway edge: Razorpay/PhonePe/Stripe take paise; Cashfree takes rupees as a number (`10.15`); PayU, Paytm and CCAvenue take rupee strings with 2 decimals (`"499.00"`). No floats for money.
-3. **Verify before fulfilling.** Paid only when the callback signature/hash verifies (constant-time compare) or, for unsigned returns (PhonePe, Cashfree, Stripe redirects; best practice also PayU and CCAvenue), the gateway status API says success, AND the order id and amount match your stored values. A redirect to a success page proves nothing. `authorized` is not paid (capture it or enable auto-capture), and a fully refunded payment is not paid; with india-payments-mcp, fulfil only on `paid: true` (status `captured` or `partially_refunded`).
+2. **Integer minor units internally** (paise for INR, cents for USD). `amount_paise BIGINT`. Convert only at the gateway edge: Razorpay/PhonePe/Stripe/Dodo take paise (Dodo: any currency's smallest unit); Cashfree takes rupees as a number (`10.15`); PayU, Paytm and CCAvenue take rupee strings with 2 decimals (`"499.00"`). No floats for money.
+3. **Verify before fulfilling.** Paid only when the callback signature/hash verifies (constant-time compare) or, for unsigned returns (PhonePe, Cashfree, Stripe and Dodo redirects; best practice also PayU and CCAvenue), the gateway status API says success, AND the order id and amount match your stored values. A redirect to a success page proves nothing. `authorized` is not paid (capture it or enable auto-capture), and a fully refunded payment is not paid; with india-payments-mcp, fulfil only on `paid: true` (status `captured` or `partially_refunded`).
 4. **Webhooks are the source of truth.** Fulfil from the webhook too; browsers close. Read the raw body bytes before parsing, verify over those bytes, dedupe by event id with a unique constraint, process in a transaction, return 2xx quickly. 4xx for bad signature; 5xx only when your processing failed (so the gateway retries).
 5. **Idempotent fulfilment.** Callback and webhook both arrive, sometimes at once. Use a guarded update (`... WHERE status IN ('created','pending')`) and fulfil only if a row changed.
 6. **Unique orderRef per attempt.** PhonePe, Paytm, Cashfree and PayU reject or misbehave on reuse. One business order, many attempts (`ord_123_a1`, `ord_123_a2`). Gateway order creation is idempotent on that ref.
-7. **Idempotent refunds.** Generate refundRef once, store it before calling the gateway, reuse it on every retry. Refund ≤ captured − already refunded. Live refunds need human approval. PayU refund token_id max 23 chars. After a timeout (`OUTCOME_UNKNOWN`), look the refund up before retrying, and never retry with a new refundRef.
+7. **Idempotent refunds.** Generate refundRef once, store it before calling the gateway, reuse it on every retry. Refund ≤ captured − already refunded. Live refunds need human approval. PayU refund token_id max 23 chars. After a timeout (`OUTCOME_UNKNOWN`), look the refund up before retrying, and never retry with a new refundRef. Dodo has no idempotency key: store refundRef in the refund's metadata and look it up before every refund (india-payments-mcp does this).
 8. **Secrets server-only.** Key secret, salt, working key, merchant key, client secret, webhook secret: env/secret manager only. Never in client bundles, mobile apps, logs or git. `NEXT_PUBLIC_`, `VITE_`, `EXPO_PUBLIC_`, `REACT_APP_` on a secret is a bug.
 9. **Reconcile.** Scheduled job: attempts stuck in created/pending/authorized past N minutes → status API → same guarded transition. Daily settlement match.
 10. **Pending UPI.** UPI can sit pending for minutes. Show "processing", never mark failed on a client timeout, do not allow a second payment while one is pending. Accept late successes (money was taken) and refund duplicates.
@@ -28,6 +28,7 @@ Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, Phon
 | Paytm | `CHECKSUMHASH` (AES-128-CBC checksum over sorted values) | same, form POST |
 | PhonePe v2 | none: Order Status API | `Authorization` = hex sha256(`username:password`), does NOT cover body: re-fetch status |
 | Stripe | n/a (fulfil on webhook) | `Stripe-Signature` t,v1: hex HMAC-SHA256(`t.body`, whsec), check every v1, 300 s tolerance |
+| Dodo Payments | none: `return_url` gets plain `payment_id`, `status`; re-fetch your stored checkout session (`GET /checkouts/{cks_id}`) and its payment, accept only that session's payment, and match `metadata.order_ref`, amount (tax-exclusive: `total_amount - tax`) and currency | Standard Webhooks: `webhook-signature` space-separated `v1,<base64>`, base64 HMAC-SHA256(`id.timestamp.body`, base64-decoded secret without `whsec_`), any v1 matches, 300 s tolerance; dedupe `webhook-id`; act only on events for your stored session id and currency |
 | Skydo | no API and no callback: status from the Zoho Books invoice Skydo marks paid, or from receipts you record in the ledger | none (Skydo emails/WhatsApps you) |
 | Infinity | no API and no callback: status from the Zoho Books invoice (only if Infinity's Zoho integration records the payment: confirm during setup), or from receipts you record in the ledger after checking the Infinity dashboard | none (Infinity notifies you in its app/dashboard) |
 
@@ -46,10 +47,10 @@ Applies to every Indian gateway (Razorpay, PayU, Cashfree, CCAvenue, Paytm, Phon
 - Live webhook URL registered (separate from test), HTTPS, secret set, events subscribed.
 - Raw-body verification works behind the production proxy/CDN.
 - Dedupe table, guarded updates, reconciliation job with alerts.
-- Razorpay auto-capture on (or capture implemented). Cashfree domain whitelisted. CCAvenue egress IP whitelisted.
+- Razorpay auto-capture on (or capture implemented). Cashfree domain whitelisted. CCAvenue egress IP whitelisted. Dodo products and webhook recreated in Live Mode, products without discounts, purchasing power parity or localized prices.
 - Refunds behind admin auth + audit log.
 - One real low-value transaction end to end, then refunded.
 
 ## Things only the human can do
 
-Merchant signup and KYC; get keys; register webhook URL + secret; enable payment methods; whitelist domain/IP; enable auto-capture; install the official Shopify app (Shopify needs no code and cannot take custom gateways); request a Stripe India invite; connect Skydo to Zoho Books or copy Skydo receiving-account details, and confirm Skydo receipts in its dashboard; connect Infinity to Zoho Books (then confirm with a first real invoice) or copy Infinity receiving-account details and/or create QuickLinks, and confirm Infinity receipts in its dashboard; approve live refunds.
+Merchant signup and KYC; get keys; register webhook URL + secret; enable payment methods; whitelist domain/IP; enable auto-capture; install the official Shopify app (Shopify needs no code and cannot take custom gateways); request a Stripe India invite; create Dodo products (test and live) and confirm the business sells digital products only; connect Skydo to Zoho Books or copy Skydo receiving-account details, and confirm Skydo receipts in its dashboard; connect Infinity to Zoho Books (then confirm with a first real invoice) or copy Infinity receiving-account details and/or create QuickLinks, and confirm Infinity receipts in its dashboard; approve live refunds.

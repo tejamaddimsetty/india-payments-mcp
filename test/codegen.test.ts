@@ -1,3 +1,4 @@
+import { hasShopifyApp } from '../src/core/capabilities.js';
 import { describe, expect, it } from 'vitest';
 import { FRAMEWORKS, generateIntegration } from '../src/codegen/index.js';
 import { PROVIDER_IDS } from '../src/core/types.js';
@@ -72,7 +73,7 @@ describe('server code', () => {
     expect(service!.contents).toContain(`PROVIDER = '${provider}'`);
     expect(service!.contents).toContain('getOrderAmount(orderId)');
     expect(service!.contents).not.toMatch(/body\??\.amount|\.amount\s*=\s*req/);
-    expect(service!.contents).toMatch(/verifyPayment\(PROVIDER, \{ payload, orderRef, expectedAmount: attempt\.amount \}\)/);
+    expect(service!.contents).toMatch(/verifyPayment\(PROVIDER, \{ payload, orderRef, expectedAmount: attempt\.amount, providerOrderId: attempt\.providerOrderId \}\)/);
     expect(service!.contents).toContain('createWebhookHandler({ client: payments, provider: PROVIDER');
 
     // Every server-side route file goes through the service (and so through the SDK).
@@ -180,12 +181,14 @@ describe('honest special cases', () => {
     expect(w).toMatch(/approved payment apps/);
     expect(w).toMatch(/Shopify Payments is not available to India-based stores/);
     const guide = r.files.find((f) => f.path === 'docs/SHOPIFY_PAYMENTS.md')!.contents;
-    if (PROVIDERS[provider].capabilities.platformPlugins.shopify) expect(guide).not.toContain('no official Shopify payments app');
+    if (hasShopifyApp(PROVIDERS[provider].capabilities)) expect(guide).not.toContain('no official Shopify payments app');
     else {
       expect(guide).toContain('no official Shopify payments app');
       expect(w).toMatch(/no verified official Shopify payments app/);
     }
     const reconcile = r.files.find((f) => f.path === 'src/shopify-reconcile.ts');
+    // No app in Shopify checkout means nothing to reconcile.
+    expect(!!reconcile).toBe(hasShopifyApp(PROVIDERS[provider].capabilities) && PROVIDERS[provider].capabilities.features.paymentStatus.support !== 'unsupported');
     if (reconcile) {
       expect(reconcile.contents).toContain("express.raw({ type: '*/*'");
       expect(reconcile.contents).toContain('timingSafeEqual');

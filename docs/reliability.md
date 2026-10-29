@@ -26,6 +26,7 @@ Which POSTs adapters mark retry-safe:
 | Razorpay | No (orders aren't idempotent) | No | Customer create (`fail_existing: "0"`) and subscription cancel: yes |
 | Cashfree | Only when you pass `idempotencyKey`, sent as `x-idempotency-key` | Yes (`refund_id`) | |
 | Stripe | Yes (every POST sends `Idempotency-Key`, default `checkout_session:<orderRef>`) | Yes (`Idempotency-Key = refundRef`) | |
+| Dodo | No (Dodo documents no idempotency header) | No (same; the adapter looks for an existing refund with the same `refundRef` before posting) | GETs and the subscription-cancel `PATCH`: yes |
 | PhonePe | No (a progressed `merchantOrderId` is BAD_REQUEST) | Yes (`merchantRefundId`) | OAuth token: yes |
 | Paytm | No | Yes (`refId`) | Status: yes |
 | PayU | n/a (form post, no API call) | No (de-duplication on `token_id` undocumented) | `verify_payment`: yes |
@@ -40,7 +41,7 @@ Two layers:
 1. **Client layer** (`withIdempotency`, all gateways). The key is scoped as `<provider>:<operation>:<key>`, and the request is fingerprinted (stable JSON, SHA-256).
    - `createPayment`: key = `idempotencyKey ?? orderRef`, kept **10 minutes**, because the cached result carries short-lived checkout data (Paytm `txnToken` lasts 15 min, PhonePe redirect URLs expire).
    - `refund`: key = `refundRef`, kept **24 h**. **refundRef is the idempotency key.**
-   - Refund lookup: when the refund POST ends in `OUTCOME_UNKNOWN`, or the gateway rejects the `refundRef` as a duplicate, the client looks the refund up by `refundRef` (`getRefundStatus`) and returns it if it exists; a different amount gives `IDEMPOTENCY_CONFLICT`. Razorpay needs `providerPaymentId` for that lookup; Cashfree and Paytm use orderRef + refundRef, PhonePe refundRef, Stripe `providerPaymentId`. **PayU and CCAvenue cannot look a refund up by reference**, so there the original error is returned (PayU's "token already exists", error 106, is reported as `OUTCOME_UNKNOWN`).
+   - Refund lookup: when the refund POST ends in `OUTCOME_UNKNOWN`, or the gateway rejects the `refundRef` as a duplicate, the client looks the refund up by `refundRef` (`getRefundStatus`) and returns it if it exists; a different amount gives `IDEMPOTENCY_CONFLICT`. Razorpay needs `providerPaymentId` for that lookup; Cashfree and Paytm use orderRef + refundRef, PhonePe refundRef, Stripe and Dodo `providerPaymentId` (Dodo matches `metadata.refund_ref`). **PayU and CCAvenue cannot look a refund up by reference**, so there the original error is returned (PayU's "token already exists", error 106, is reported as `OUTCOME_UNKNOWN`).
    - Same key + same request → the stored result is returned and no gateway call is made. Same key + different request → `IDEMPOTENCY_CONFLICT`. **Failures aren't stored**, so a failed call can be retried with the same key.
    - `MemoryIdempotencyStore` holds 10,000 entries (oldest evicted first). It's **per-process and lost on restart.**
 2. **Gateway layer**: the de-duplicating ids in the table above. These protect you even when the client store is cold, for example after a restart or across replicas.
@@ -53,7 +54,7 @@ Note: within one process, concurrent identical calls share one in-flight executi
 
 - `PAYMENTS_HTTP_TIMEOUT_MS` (default 30,000) per HTTP attempt, enforced with `AbortController`. A timeout surfaces as `TIMEOUT`.
 - The total worst case for a retry-safe call is about `(maxRetries + 1) × timeout + backoff`. With the defaults that's about 90 s. MCP clients may give up sooner. Lower the timeout (for example 10,000) for interactive agent use.
-- Gateway-side expiries to plan around: Paytm `txnToken` lasts 15 min. PhonePe `expireAfter` is 300-3600 s. Stripe Checkout Sessions last 24 h by default. Cashfree orders have `order_expiry_time`. `createPayment` returns `expiresAt` where the gateway provides it.
+- Gateway-side expiries to plan around: Paytm `txnToken` lasts 15 min. PhonePe `expireAfter` is 300-3600 s. Stripe Checkout Sessions last 24 h by default. A Dodo `checkout_url` works once and expires after 24 h. Cashfree orders have `order_expiry_time`. `createPayment` returns `expiresAt` where the gateway provides it.
 
 ## 4. Reconciliation jobs
 
@@ -63,12 +64,12 @@ Webhooks get lost, endpoints go down and statuses change after the fact. Run rec
 |---|---|---|
 | **Pending sweeper** | every 5-15 min | For orders in `created` / `pending` / `authorized` (authorised is not paid: it must become `captured`) older than N minutes (and younger than the gateway's expiry), call `getPaymentStatus`. Advance state monotonically. Mark expired ones `expired` |
 | **Refund sweeper** | hourly | For refunds in `pending`, call `getRefundStatus`. Alert on refunds pending more than 7 days, or the gateway's SLA |
-| **Daily settlement recon** | daily | `listSettlements` for yesterday (Razorpay; Stripe via payouts). Match settled amount = Σ captured − refunds − fees − tax against your ledger. Investigate mismatches. For gateways where settlements are Planned, use dashboard reports |
+| **Daily settlement recon** | daily | `listSettlements` for yesterday (Razorpay; Stripe and Dodo via payouts; Dodo pays out net of fees in USD, GBP or EUR, by default twice a month). Match settled amount = Σ captured − refunds − fees − tax against your ledger. Investigate mismatches. For gateways where settlements are Planned, use dashboard reports |
 | **Webhook gap check** | daily | Orders `captured` per status API with no corresponding webhook point to a broken endpoint or secret |
 
 All of these are read-only and safe to run in `live` mode without `PAYMENTS_ALLOW_LIVE_MUTATIONS`.
 
-Status API requirements: Razorpay needs `providerOrderId`, and Stripe needs the `cs_` / `pi_` id (mock mode enforces the same). Others look up by `orderRef`. Skydo and Infinity (Zoho bridge) cost one Zoho call with `providerOrderId`, two without; Zoho Books allows 1,000 (Free) to 10,000 (Premium and above) calls per day, and a 15-minute poll costs 96 calls a day per open invoice. **Persist `providerOrderId` and `providerPaymentId` next to `orderRef`.**
+Status API requirements: Razorpay needs `providerOrderId`, Stripe needs the `cs_` / `pi_` id, and Dodo needs the `cks_` session id or the `pay_` id, because Dodo cannot search by metadata (mock mode enforces the same; prefer the `cks_` id, since a `pay_` lookup alone is bound by metadata only, and a charge in another currency is reported as `unknown`). Others look up by `orderRef`. Skydo and Infinity (Zoho bridge) cost one Zoho call with `providerOrderId`, two without; Zoho Books allows 1,000 (Free) to 10,000 (Premium and above) calls per day, and a 15-minute poll costs 96 calls a day per open invoice. **Persist `providerOrderId` and `providerPaymentId` next to `orderRef`.**
 
 ## 5. Observability
 
@@ -89,6 +90,7 @@ Symptom: `createPayment` returns `OUTCOME_UNKNOWN` (or `TIMEOUT` / `NETWORK` whe
 1. **Don't** call create again with a new orderRef. You may end up with two live orders for one cart.
 2. For gateways keyed by your `orderRef` (Cashfree, PhonePe, Paytm, PayU, CCAvenue), call `getPaymentStatus({ orderRef })`. If the order exists, reuse it. If `NOT_FOUND`, it's safe to create with the **same** orderRef.
 3. For Stripe, retry with the same orderRef / `idempotencyKey`. The `Idempotency-Key` makes the gateway return the original Session.
+   For Dodo, create again with the same orderRef. Dodo has no idempotency key and cannot be searched by orderRef, so a lost session cannot be found; it was never shown to the customer, works only once and expires after 24 h. Store the new `providerOrderId`.
 4. For Razorpay, retry with the **same** orderRef. Razorpay rejects a second order with the same `receipt` as a duplicate, and the adapter then fetches the existing order by receipt and returns it if amount and currency match (otherwise the original error is thrown). Store the returned `providerOrderId`.
 5. For Skydo or Infinity with the Zoho bridge, retry with the same orderRef: the adapter finds the existing invoice by reference and returns the full invoice. If a concurrent create made a twin, every process keeps the oldest `invoice_id` and voids only its own losing invoice.
 6. A client-layer replay with the same key only returns a stored result if the first call **succeeded**. Failures aren't cached, so step 2 applies.
@@ -123,8 +125,8 @@ Symptom: `payment.succeeded` is processed, and then the browser lands on the ret
 
 The client already tries step 1 itself after `OUTCOME_UNKNOWN` or a duplicate rejection, where the gateway supports a lookup by `refundRef`; if that lookup succeeds you get the refund back instead of an error.
 
-1. Call `getRefundStatus` with the same `refundRef` (plus the ids the gateway needs: Razorpay `providerRefundId` or `providerPaymentId`; PayU `providerRefundId`; Cashfree/Paytm `orderRef`; Stripe `providerRefundId` or `providerPaymentId`).
-2. If found, record it. If not found, retry `refund` with the **same** `refundRef`, never a new one. Gateways that de-duplicate on it (Cashfree, PhonePe, Paytm, Stripe) are safe; Razorpay rejects the duplicate and the client then finds the existing refund.
+1. Call `getRefundStatus` with the same `refundRef` (plus the ids the gateway needs: Razorpay `providerRefundId` or `providerPaymentId`; PayU `providerRefundId`; Cashfree/Paytm `orderRef`; Stripe or Dodo `providerRefundId` or `providerPaymentId`).
+2. If found, record it. If not found, retry `refund` with the **same** `refundRef`, never a new one. Gateways that de-duplicate on it (Cashfree, PhonePe, Paytm, Stripe) are safe; Razorpay rejects the duplicate and the client then finds the existing refund. Dodo does not de-duplicate, but its adapter fetches the payment's refunds (at most 25) and returns one with the same `refundRef` before posting, and Dodo allows only one refund in flight per payment. That check is per call, so run Dodo refunds from one place; Dodo does not document how quickly a new refund appears on the payment, so if the lookup finds nothing right after a timeout, check the Dodo dashboard before retrying.
 3. For PayU / CCAvenue, check `getPaymentStatus().amountRefunded` and the dashboard before retrying: PayU rejects a reused `token_id` (error 106, reported as `OUTCOME_UNKNOWN`) and CCAvenue a reused `refund_ref_no`, and neither can look a refund up by reference.
 
 ### Playbook: gateway outage

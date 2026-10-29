@@ -69,11 +69,11 @@ const INR_ONLY: ReadonlySet<ProviderId> = new Set(['payu', 'paytm', 'phonepe']);
 /** Real status lookup needs providerOrderId (Razorpay order_..., Stripe cs_/pi_...). */
 const STATUS_NEEDS_PROVIDER_ORDER_ID: ReadonlySet<ProviderId> = new Set(['razorpay', 'stripe']);
 /** Real refund needs providerPaymentId. */
-const REFUND_NEEDS_PROVIDER_PAYMENT_ID: ReadonlySet<ProviderId> = new Set(['razorpay', 'stripe', 'payu', 'paytm', 'ccavenue']);
+const REFUND_NEEDS_PROVIDER_PAYMENT_ID: ReadonlySet<ProviderId> = new Set(['razorpay', 'stripe', 'payu', 'paytm', 'ccavenue', 'dodo']);
 /** Real gateway rejects a reused refund reference instead of returning the earlier refund. */
 const REFUND_DUPLICATE_REJECTED: ReadonlySet<ProviderId> = new Set(['razorpay', 'payu', 'ccavenue']);
 /** Real verifyPayment is a server-side status lookup (unsigned redirect), not a signed callback. */
-const VERIFY_BY_STATUS_LOOKUP: ReadonlySet<ProviderId> = new Set(['skydo', 'infinity', 'cashfree', 'phonepe', 'stripe']);
+const VERIFY_BY_STATUS_LOOKUP: ReadonlySet<ProviderId> = new Set(['skydo', 'infinity', 'cashfree', 'phonepe', 'stripe', 'dodo']);
 
 /** Shared across all mock gateways in a process so the MCP server keeps state between tool calls. */
 export class MockLedger {
@@ -224,6 +224,9 @@ export class MockGateway implements PaymentGateway {
   async getPaymentStatus(input: PaymentStatusInput): Promise<PaymentStatusResult> {
     if (STATUS_NEEDS_PROVIDER_ORDER_ID.has(this.id) && !input.providerOrderId) {
       throw new PaymentError('VALIDATION', `Mock ${this.id}: status lookup needs providerOrderId (returned by createPayment), as on the real gateway.`, { provider: this.id });
+    }
+    if (this.id === 'dodo' && !input.providerOrderId && !input.providerPaymentId) {
+      throw new PaymentError('VALIDATION', 'Mock dodo: status lookup needs providerOrderId or providerPaymentId, as on the real gateway (Dodo cannot search by orderRef).', { provider: this.id });
     }
     const p = this.find(input.orderRef);
     if (input.providerOrderId && input.providerOrderId !== p.providerOrderId) {

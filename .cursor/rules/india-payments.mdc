@@ -1,5 +1,5 @@
 ---
-description: Indian payment gateway integrations (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe India, Skydo, Infinity) - checkout, UPI, callbacks, webhooks, refunds, subscriptions, reconciliation
+description: Indian payment gateway integrations (Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe India, Dodo Payments, Skydo, Infinity) - checkout, UPI, callbacks, webhooks, refunds, subscriptions, reconciliation
 globs:
 alwaysApply: false
 ---
@@ -13,11 +13,11 @@ If the `india-payments` MCP server is connected, call `payments_get_capabilities
 Rules you must not break:
 
 - Amount computed on the server; never accepted from the client. Store integer paise; convert only at the gateway edge (Cashfree rupee number; PayU/Paytm/CCAvenue rupee strings).
-- Mark paid only after constant-time signature verification or a status-API confirmation (PhonePe, Cashfree are unsigned), with order id and amount matched against stored values.
+- Mark paid only after constant-time signature verification or a status-API confirmation (PhonePe, Cashfree, Stripe and Dodo returns are unsigned), with order id and amount matched against stored values.
 - Webhooks: raw body, verify, dedupe by event id (unique constraint), guarded status update, 2xx fast.
 - Unique orderRef per attempt; idempotent creation. Refunds idempotent by a refundRef reused on retry.
 - Secrets server-only (no `NEXT_PUBLIC_`/`VITE_`/`EXPO_PUBLIC_`/`REACT_APP_`, no mobile bundles, no logs).
 - Reconciliation job for stuck attempts; handle pending UPI without failing on timeout.
-- Shopify: install the gateway's official app; do not write a checkout gateway. Skydo and Infinity: no API (Zoho Books bridge or a receipts ledger). Stripe India: invite-only.
+- Shopify: install the gateway's official app; do not write a checkout gateway. Skydo and Infinity: no API (Zoho Books bridge or a receipts ledger). Stripe India: invite-only. Dodo Payments: digital products only, products must exist in Dodo first, verify needs the stored `cks_` session id, no idempotency key.
 
 When working on the india-payments-mcp repository itself, follow `AGENTS.md`.

@@ -8,7 +8,7 @@
  * Provider facts (credentials, SDK links, plugins, constraints) are read from the live capability
  * maps in src/providers, so the generated env template can never drift from what the SDK reads.
  */
-import type { ProviderCapabilities } from '../core/capabilities.js';
+import { hasShopifyApp, type ProviderCapabilities } from '../core/capabilities.js';
 import type { ProviderId } from '../core/types.js';
 import { PROVIDERS } from '../providers/index.js';
 import { jsSdkFor, startCheckoutModule } from './templates/browser.js';
@@ -264,12 +264,14 @@ function shopify(ctx: TemplateContext, warnings: string[]): GeneratedIntegration
   warnings.push(
     'Shopify only lets approved payment apps into checkout (custom payment extensions are Shopify Plus only), and Shopify Payments is not available to India-based stores. You cannot connect this SDK or your own server to Shopify checkout; install the gateway\'s official Shopify app instead.',
   );
-  if (!cap.platformPlugins.shopify) {
+  const hasApp = hasShopifyApp(cap);
+  if (!hasApp) {
     warnings.push(`${cap.displayName} has no verified official Shopify payments app. Choose a gateway that has one (Razorpay, PayU, PhonePe, Cashfree) for Shopify.`);
   }
   warnings.push('Issue refunds from Shopify Admin so Shopify and the gateway stay in sync; the generated server only reconciles.');
   const files: GeneratedFile[] = [{ path: 'docs/SHOPIFY_PAYMENTS.md', language: 'markdown', contents: shopifyGuide(ctx) }];
-  if (cap.features.paymentStatus.support !== 'unsupported') {
+  // Nothing to reconcile without an app that puts the gateway in Shopify checkout.
+  if (hasApp && cap.features.paymentStatus.support !== 'unsupported') {
     files.push({ path: 'src/shopify-reconcile.ts', language: 'typescript', contents: shopifyReconcileServer(ctx) });
     const env = envFile(ctx);
     env.contents += '\n# Shopify webhook signing secret (Settings > Notifications > Webhooks, or your custom app\'s API secret).\nSHOPIFY_WEBHOOK_SECRET=\n';
@@ -278,12 +280,12 @@ function shopify(ctx: TemplateContext, warnings: string[]): GeneratedIntegration
   return {
     provider: cap.provider,
     framework: 'shopify',
-    summary: `Shopify guide for ${cap.displayName}: install the official app (${cap.platformPlugins.shopify ? 'available' : 'none verified'}), plus an optional reconciliation server that checks Shopify "orders/paid" against the gateway with india-payments-mcp.`,
+    summary: `Shopify guide for ${cap.displayName}: install the official app (${hasApp ? 'available' : 'none verified'}), plus an optional reconciliation server that checks Shopify "orders/paid" against the gateway with india-payments-mcp.`,
     files,
     envVars: files.length > 1 ? [...envVarsFor(ctx), 'SHOPIFY_WEBHOOK_SECRET'] : [],
     dashboardSteps: [
-      cap.platformPlugins.shopify
-        ? `Shopify Admin > Settings > Payments: add ${cap.displayName} (${oneLine(cap.platformPlugins.shopify)}).`
+      hasApp
+        ? `Shopify Admin > Settings > Payments: add ${cap.displayName} (${oneLine(cap.platformPlugins.shopify ?? "")}).`
         : `No official ${cap.displayName} Shopify app was verified: pick another gateway for Shopify checkout.`,
       `Turn on ${cap.displayName}'s test mode in its own dashboard and place a test order in Shopify.`,
       'Shopify Admin > Settings > Notifications > Webhooks: subscribe orders/paid and refunds/create to https://YOUR_DOMAIN/webhooks/shopify (only if you run the reconciliation server).',

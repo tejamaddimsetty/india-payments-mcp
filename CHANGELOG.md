@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-29
+
+### Fixed
+
+- Shopify code generation treated a "No ... app" / "Not usable ..." plugin note as an official app (Paytm, Stripe). It now says there is none and generates no reconciliation server for gateways without an app (`hasShopifyApp`).
+
+### Added
+
+- **Dodo Payments adapter** (provider id `dodo`): Merchant of Record for digital products. See [docs/dodo.md](docs/dodo.md); facts with sources in [dodo-api-facts.md](docs/research/dodo-api-facts.md).
+  - Payments: hosted Checkout Session (`POST /checkouts`) for a product created in Dodo (`providerOptions.productId` or `DODO_PAYMENTS_DEFAULT_PRODUCT_ID`). The product is read first: a fixed price must equal `amount` in `currency`; pay-what-you-want products take `amount`. `metadata` carries `order_ref` and the expected amount and currency.
+  - Verification: the unsigned `return_url` redirect is re-read with `GET /checkouts/{id}` and `GET /payments/{id}`. It requires `providerOrderId`: the payment must belong to the checkout session we created (anyone can attach our `order_ref` to a payment of their own via static-link metadata), then `order_ref`, amount and currency must match. Tax Dodo adds on top of a tax-exclusive price still matches. Sessions turn off discount codes and currency selection, which Dodo enables by default.
+  - No API idempotency key: POSTs are never retried (`OUTCOME_UNKNOWN`), and refunds first look for an existing refund with the same `refund_ref`.
+  - Refunds (full, or one partial item in the payment currency), refund status, Standard Webhooks (checked against the reference test vector and the official `standardwebhooks` library), customers, subscriptions for recurring products (checkout + `PATCH` cancel), payouts as settlements.
+  - Key-prefix cross-check (`dodo_test_` in sandbox, `dodo_live_` in live), protected `providerOptions` (cart, customer, currency, discounts, saved-method charges, feature flags), Dodo metadata limits, mock-mode parity (product id and status-lookup rules).
+  - Code generator profile (redirect return, webhook events, dashboard checklist).
+- Generated code (every gateway): the payment callback now passes the stored `providerOrderId` to `verifyPayment`. For Dodo, the generated webhook handler also ignores events whose session or currency differ from the stored order.
+- `standardwebhooks` (dev dependency) to test the Dodo webhook verifier against the official library.
+- Independent line-by-line check of the adapter against Dodo's official docs ([dodo-doc-verification.md](docs/research/verification/dodo-doc-verification.md)) and an adversarial review ([dodo-review.md](docs/research/verification/dodo-review.md)).
+
 ## [0.3.0] - 2026-10-29
 
 ### Added

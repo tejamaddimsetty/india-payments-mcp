@@ -65,7 +65,7 @@ describe('MCP server over stdio (mock mode)', () => {
 
   it('discovery tools', async () => {
     const list = await call(client, 'payments_list_providers', {});
-    expect(list.data.providers).toHaveLength(9);
+    expect(list.data.providers).toHaveLength(10);
     const caps = await call(client, 'payments_get_capabilities', { provider: 'skydo' });
     expect(caps.data.features.createPayment.support).toBe('partial');
     expect(caps.data.features.webhooks.support).toBe('unsupported');
@@ -166,7 +166,7 @@ describe('MCP server over stdio (mock mode)', () => {
     const skydoRefund = await call(client, 'payments_refund', { provider: 'skydo', order_ref: 'sky_1', refund_ref: 'rf_sky_1' });
     expect(skydoRefund).toMatchObject({ isError: true, data: { error: 'UNSUPPORTED' } });
     // The server is still alive afterwards.
-    expect((await call(client, 'payments_list_providers', {})).data.providers).toHaveLength(9);
+    expect((await call(client, 'payments_list_providers', {})).data.providers).toHaveLength(10);
   });
 });
 

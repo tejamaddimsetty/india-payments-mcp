@@ -15,7 +15,7 @@ MCP_HTTP_TOKEN=$MCP_HTTP_TOKEN PAYMENTS_MODE=mock npx india-payments-mcp http
 - MCP endpoint: exactly `/mcp` (other paths are 404). Health check: `/healthz` (no auth; returns version and mode only).
 - `MCP_HTTP_PORT` must be an integer from 1 to 65535. Sessions idle for 30 minutes are closed (the client reconnects), and the server holds at most 1,000 sessions.
 - Every `/mcp` request needs `Authorization: Bearer <MCP_HTTP_TOKEN>`. The server refuses to start without a token of 24+ characters.
-- Add gateway test credentials as env vars for sandbox (`RAZORPAY_KEY_ID=rzp_test_…`, etc.). Restrict which gateways are exposed with `PAYMENTS_PROVIDERS=razorpay,cashfree`.
+- Add gateway test credentials as env vars for sandbox (`RAZORPAY_KEY_ID=rzp_test_…`, `DODO_PAYMENTS_API_KEY=dodo_test_…` plus `DODO_PAYMENTS_DEFAULT_PRODUCT_ID`, etc.). Restrict which gateways are exposed with `PAYMENTS_PROVIDERS=razorpay,cashfree`.
 - Verify locally:
 
 ```bash

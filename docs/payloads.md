@@ -400,7 +400,7 @@ Decryption is not authentication (with the classic cbc kit, AES-CBC has no MAC),
 { "provider": "razorpay", "order_ref": "ORD_1001", "provider_order_id": "order_PbX4qJ7d2Kf9Lm" }
 ```
 
-`provider_order_id` is required for Razorpay and Stripe (also in mock mode). CCAvenue also accepts `provider_payment_id` (`reference_no`). Razorpay reports a captured instalment of a partly paid order as `pending`; Cashfree reports `refunded` / `partially_refunded` from its Get All Refunds call.
+`provider_order_id` is required for Razorpay and Stripe, and Dodo needs `provider_order_id` or `provider_payment_id` (also in mock mode). CCAvenue also accepts `provider_payment_id` (`reference_no`). Razorpay reports a captured instalment of a partly paid order as `pending`; Cashfree reports `refunded` / `partially_refunded` from its Get All Refunds call.
 
 ```json
 {
@@ -436,7 +436,7 @@ Decryption is not authentication (with the classic cbc kit, AES-CBC has no MAC),
 { "provider": "razorpay", "refundRef": "RF_ORD_1001_1", "providerRefundId": "rfnd_PbY1c2D3e4F5g6", "status": "processed", "amount": 10000 }
 ```
 
-Sending the identical call again within the same server process (24 h) returns the identical result from the idempotency store, with no second refund. If the refund POST ends in `OUTCOME_UNKNOWN`, or the gateway rejects `refund_ref` as a duplicate (for example after a restart), the client looks the refund up by `refund_ref` and returns it when it exists (Razorpay needs `provider_payment_id`; a different amount gives `IDEMPOTENCY_CONFLICT`). PayU and CCAvenue cannot look a refund up by reference, so there the error stands: check the dashboard, and never retry with a new `refund_ref`. Razorpay, PayU, Paytm, CCAvenue and Stripe need `provider_payment_id`. Live mode is blocked unless the [double gate](#live_mutation_blocked) is satisfied:
+Sending the identical call again within the same server process (24 h) returns the identical result from the idempotency store, with no second refund. If the refund POST ends in `OUTCOME_UNKNOWN`, or the gateway rejects `refund_ref` as a duplicate (for example after a restart), the client looks the refund up by `refund_ref` and returns it when it exists (Razorpay and Dodo need `provider_payment_id`; a different amount gives `IDEMPOTENCY_CONFLICT`). PayU and CCAvenue cannot look a refund up by reference, so there the error stands: check the dashboard, and never retry with a new `refund_ref`. Razorpay, PayU, Paytm, CCAvenue, Stripe and Dodo need `provider_payment_id`. Live mode is blocked unless the [double gate](#live_mutation_blocked) is satisfied:
 
 ```json
 { "provider": "razorpay", "order_ref": "ORD_1001", "refund_ref": "RF_ORD_1001_1", "provider_payment_id": "pay_PbX5aQ1zZ8Yw3T", "amount": 10000, "confirm": true }
@@ -448,7 +448,7 @@ Sending the identical call again within the same server process (24 h) returns t
 { "provider": "razorpay", "refund_ref": "RF_ORD_1001_1", "provider_refund_id": "rfnd_PbY1c2D3e4F5g6" }
 ```
 
-Ids per gateway: Razorpay `provider_refund_id` (`rfnd_…`), or `provider_payment_id` (`pay_…`) to find the refund by `refund_ref`; PayU `provider_refund_id` (the `request_id` from `payments_refund`); Cashfree and Paytm `order_ref` + `refund_ref`; PhonePe `refund_ref`; Stripe `provider_refund_id` (`re_…`) or `provider_payment_id` (`pi_`/`ch_…`); CCAvenue has no refund-status lookup.
+Ids per gateway: Razorpay `provider_refund_id` (`rfnd_…`), or `provider_payment_id` (`pay_…`) to find the refund by `refund_ref`; PayU `provider_refund_id` (the `request_id` from `payments_refund`); Cashfree and Paytm `order_ref` + `refund_ref`; PhonePe `refund_ref`; Stripe `provider_refund_id` (`re_…`) or `provider_payment_id` (`pi_`/`ch_…`); Dodo `provider_refund_id`, or `provider_payment_id` (`pay_…`) to find the refund by `refund_ref`; CCAvenue has no refund-status lookup.
 
 ```json
 { "provider": "razorpay", "refundRef": "RF_ORD_1001_1", "providerRefundId": "rfnd_PbY1c2D3e4F5g6", "status": "processed", "amount": 10000 }
@@ -761,6 +761,106 @@ Same arguments and result shapes as the Skydo tools above, with `provider: "infi
 
 ```json
 { "error": "LIVE_MUTATION_BLOCKED", "message": "Recording an Infinity receipt on infinity is blocked: Infinity documents no sandbox, so sandbox mode works on real data.", "retryable": false, "provider": "infinity", "hint": "Set PAYMENTS_ALLOW_LIVE_MUTATIONS=true on the server AND pass confirm=true on the call after a human has approved it." }
+```
+
+---
+
+## Dodo Payments
+
+Dodo is a Merchant of Record with no ad-hoc prices; see [dodo.md](dodo.md) for setup. Amounts are minor units of `currency`, the same unit Dodo uses. These examples come from running the adapter against fixtures: nothing here has yet been run against Dodo's test mode.
+
+### `payments_create_payment` → `redirect`
+
+`provider_options.productId` (or `DODO_PAYMENTS_DEFAULT_PRODUCT_ID`) names a product created in Dodo. Its fixed price must be exactly `amount` in `currency` (a pay-what-you-want product takes `amount`; Dodo requires its base currency to be USD, GBP or EUR). The adapter reads the product first, so a mismatch (or a product discount, purchasing power parity or localized prices) fails before any checkout session is created. The session it creates turns off discount codes and currency selection, and stores `order_ref`, `expected_amount` and `expected_currency` in its metadata.
+
+```json
+{ "provider": "dodo", "order_ref": "ORD_3001", "amount": 149900, "currency": "INR", "customer": { "name": "Asha Rao", "email": "asha@example.com" }, "return_url": "https://shop.example.com/pay/return?order=ORD_3001", "provider_options": { "productId": "pdt_0NpX1" } }
+```
+
+```json
+{
+  "provider": "dodo",
+  "environment": "sandbox",
+  "orderRef": "ORD_3001",
+  "providerOrderId": "cks_0Nq7bZ8vW3hY1",
+  "status": "created",
+  "amount": 149900,
+  "currency": "INR",
+  "checkout": { "type": "redirect", "url": "https://test.checkout.dodopayments.com/session/cks_0Nq7bZ8vW3hY1", "method": "GET" },
+  "expiresAt": "2026-10-30T12:08:33.599Z"
+}
+```
+
+Store `providerOrderId` (the `cks_` checkout session id): Dodo cannot look a payment up by `order_ref`. The checkout URL expires after 24 hours. Dodo has no idempotency header, so this POST is never retried; after `OUTCOME_UNKNOWN`, creating again with the same `order_ref` is safe (the lost session was never shown to the customer and expires).
+
+### `payments_verify_payment` (status API)
+
+Dodo redirects to `return_url` with unsigned `payment_id` and `status`. Pass them with the stored session id; the adapter re-reads the session and the payment and ignores the `status` param:
+
+```json
+{ "provider": "dodo", "payload": { "payment_id": "pay_0Nq7cR2xK9mT4", "status": "succeeded" }, "order_ref": "ORD_3001", "expected_amount": 149900, "provider_order_id": "cks_0Nq7bZ8vW3hY1" }
+```
+
+Here Dodo added 18% tax on top of a tax-exclusive price (`total_amount` 176882, `tax` 26982), so the payment binds on `total_amount - tax`:
+
+```json
+{ "valid": true, "paid": true, "status": "captured", "orderRef": "ORD_3001", "providerOrderId": "cks_0Nq7bZ8vW3hY1", "providerPaymentId": "pay_0Nq7cR2xK9mT4", "amount": 149900, "verifiedVia": "status_api" }
+```
+
+A payment whose total matches neither the price nor the price plus tax (for example the wrong `expected_amount`) is never paid:
+
+```json
+{ "valid": false, "paid": false, "status": "captured", "orderRef": "ORD_3001", "providerOrderId": "cks_0Nq7bZ8vW3hY1", "providerPaymentId": "pay_0Nq7cR2xK9mT4", "amount": 176882, "verifiedVia": "status_api", "reason": "Amount mismatch: Dodo charged 176882 INR (tax 26982), expected 99900. Discounts or Adaptive Currency change the total." }
+```
+
+The other refusals, each `valid: false` with a `reason`: a `payment_id` that is not the session's own, a payment whose `checkout_session_id` is another session, a payment whose `metadata.order_ref` is another order's, and a charge in another currency than the order's (`"Currency mismatch: Dodo charged USD, the order is in INR (Adaptive Currency?)."`). A session the customer has not paid yet is `valid: true`, `status: "created"`. `provider_order_id` is required, because anyone can put your `order_ref` on a Dodo payment of their own (static payment links take `metadata_<key>`). Without it, in every mode:
+
+```json
+{ "valid": false, "paid": false, "status": "unknown", "verifiedVia": "status_api", "reason": "Pass providerOrderId: the cks_ checkout session id createPayment returned." }
+```
+
+### `payments_get_status`, `payments_refund`
+
+`payments_get_status` needs `provider_order_id` or `provider_payment_id`; it reports the matched price as `amount` and the method (`upi_intent`, `credit`, ...). A payment without our `metadata.order_ref`, or with another order's, is refused with `VALIDATION`; a charge in another currency is reported as `unknown`. A lookup by `provider_payment_id` alone is bound by metadata only, so fulfil on `payments_verify_payment` instead:
+
+```json
+{ "provider": "dodo", "orderRef": "ORD_3001", "providerOrderId": "cks_0Nq7bZ8vW3hY1", "providerPaymentId": "pay_0Nq7cR2xK9mT4", "status": "captured", "amount": 149900, "currency": "INR", "method": "upi_intent" }
+```
+
+Refunds need `provider_payment_id` and refuse payments not created through this library. A full refund (no `amount`) sends no items and no currency, with `refund_ref` in the refund's metadata. For the taxed payment above the result reports the price, not the tax-inclusive total:
+
+```json
+{ "provider": "dodo", "order_ref": "ORD_3001", "refund_ref": "RF_ORD_3001_1", "provider_payment_id": "pay_0Nq7cR2xK9mT4", "reason": "Customer cancelled" }
+```
+
+```json
+{ "provider": "dodo", "refundRef": "RF_ORD_3001_1", "providerRefundId": "rfn_0NqA4", "status": "pending", "amount": 149900 }
+```
+
+A partial refund is one cart item in the payment currency, and only for payments where Dodo did not add tax on top. On this payment it is refused:
+
+```json
+{ "error": "VALIDATION", "message": "Dodo added tax on top of payment pay_0Nq7cR2xK9mT4 (total 176882, price 149900); partial refunds of such payments are not supported here.", "retryable": false, "provider": "dodo", "hint": "Refund in full (omit amount), or make the partial refund in the Dodo dashboard." }
+```
+
+Before the POST the adapter fetches the payment's refunds (at most 25) and returns one with the same `refund_ref` if there is one (a different amount gives `IDEMPOTENCY_CONFLICT`). Dodo allows one refund in `pending`/`review` per payment, within 30 days, funded from your Dodo balance. `payments_get_refund_status` takes `provider_refund_id`, or `provider_payment_id` to find the refund by `refund_ref`.
+
+### Dodo errors
+
+```json
+{ "error": "VALIDATION", "message": "Dodo charges for a product you created in Dodo: pass providerOptions.productId or set DODO_PAYMENTS_DEFAULT_PRODUCT_ID.", "retryable": false, "provider": "dodo", "hint": "Create the product in the Dodo dashboard (Products). For arbitrary amounts, create one pay-what-you-want product (USD/GBP/EUR)." }
+```
+
+```json
+{ "error": "VALIDATION", "message": "Dodo product pdt_0NpX1 costs 149900 INR (minor units), not 99900. Dodo has no ad-hoc prices.", "retryable": false, "provider": "dodo", "hint": "Pass the productId whose price is this amount, or use a pay-what-you-want product." }
+```
+
+```json
+{ "error": "VALIDATION", "message": "Dodo status lookup needs providerOrderId (the cks_ checkout session id from createPayment) or providerPaymentId (pay_...). Dodo cannot search by orderRef.", "retryable": false, "provider": "dodo", "hint": "Store providerOrderId next to your orderRef when you create the payment." }
+```
+
+```json
+{ "error": "CONFIG_INVALID", "message": "A dodo_live_ key with PAYMENTS_MODE=sandbox. Use a test-mode key (dodo_test_...).", "retryable": false, "provider": "dodo" }
 ```
 
 ---

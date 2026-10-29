@@ -24,6 +24,12 @@ export interface ProviderProfile {
   dashboardSteps: string[];
   /** One sentence about how this gateway's return is trusted. */
   trustNote: string;
+  /**
+   * The webhook names the checkout session (providerOrderId) and anyone can attach our order_ref to a
+   * payment of their own (Dodo static links take metadata_<key>), so the handler must match the stored
+   * session and currency before changing state.
+   */
+  webhookBindsSession?: boolean;
 }
 
 const P: Record<ProviderId, ProviderProfile> = {
@@ -145,6 +151,24 @@ const P: Record<ProviderId, ProviderProfile> = {
       'Download the FIRA for each received payment from the dashboard for GST/export compliance.',
     ],
     trustNote: 'Skydo has no public API or webhooks: status comes from the Zoho invoice Skydo marks paid, or from receipts an admin records in the ledger.',
+  },
+  dodo: {
+    returnStyle: ['redirect_get'],
+    webhookEvents: {
+      checkout: ['payment.succeeded', 'payment.failed', 'payment.processing', 'payment.cancelled'],
+      refunds: ['refund.succeeded', 'refund.failed'],
+      subscriptions: ['subscription.active', 'subscription.renewed', 'subscription.on_hold', 'subscription.cancelled', 'subscription.failed', 'subscription.expired'],
+    },
+    dashboardSteps: [
+      'Dodo sells digital products only (SaaS, AI, digital goods). Physical goods and manual or human-delivered services are not allowed: check your business fits before integrating.',
+      'Switch the dashboard to Test Mode. Developer > API Keys: create a key (dodo_test_...) and put it in DODO_PAYMENTS_API_KEY.',
+      'Products: create the product you sell. Dodo has no ad-hoc prices: getOrderAmount() must return exactly the product price, or create one pay-what-you-want product (USD/GBP/EUR) and set its id as DODO_PAYMENTS_DEFAULT_PRODUCT_ID.',
+      'Developer > Webhooks > Add endpoint: {{BASE}}/api/payments/webhook with the events listed below. Copy the endpoint secret (whsec_...) into DODO_PAYMENTS_WEBHOOK_KEY.',
+      'Our checkout sessions turn off discount codes and currency selection. Keep product discounts, purchasing power parity and localized prices off (refused), and Adaptive Currency off on the account: a charge in another currency is a currency mismatch, never paid. Test webhooks: payments_simulate_webhook with provider_order_id = the stored cks_ id.',
+      'Before go-live: complete verification (KYC, bank and business checks), recreate the product and webhook in Live Mode (test and live are separate), and use a dodo_live_ key with PAYMENTS_MODE=live. Payouts are in USD, GBP or EUR.',
+    ],
+    trustNote: 'Dodo returns to return_url with an unsigned payment_id; the SDK re-reads the payment server-side and binds it to the checkout session we created, and the Standard Webhooks-signed webhook is matched to that session too.',
+    webhookBindsSession: true,
   },
   infinity: {
     returnStyle: [],

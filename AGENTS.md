@@ -4,7 +4,7 @@ Instructions for coding agents (Claude Code, Codex, Cursor, Copilot, etc.) worki
 
 ## What this is
 
-`india-payments-mcp`: an MCP server and TypeScript SDK that puts Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Skydo and Infinity behind one interface. Node ≥ 20, ESM, TypeScript, zero runtime dependencies beyond `@modelcontextprotocol/sdk` and `zod`. Gateways are called with plain `fetch`, never vendor SDKs.
+`india-payments-mcp`: an MCP server and TypeScript SDK that puts Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Dodo Payments, Skydo and Infinity behind one interface. Node ≥ 20, ESM, TypeScript, zero runtime dependencies beyond `@modelcontextprotocol/sdk` and `zod`. Gateways are called with plain `fetch`, never vendor SDKs.
 
 ## Layout
 
@@ -30,7 +30,7 @@ src/
   codegen/                 payments_generate_integration templates, recommendations, support matrix
   mcp/server.ts            MCP tools, resources, prompts, server instructions
 test/                      vitest
-docs/research/gateway-api-facts.md   per-gateway facts with VERIFIED / PARTIAL / UNVERIFIED labels
+docs/research/gateway-api-facts.md   per-gateway facts with VERIFIED / PARTIAL / UNVERIFIED labels (Dodo Payments: docs/research/dodo-api-facts.md)
 skills/india-payments/     Claude Agent Skill for people integrating payments (docs, not code)
 chatgpt/                   Custom GPT instructions, knowledge files, connector setup, generic system prompt
 ```
@@ -52,9 +52,9 @@ Run `npm test` and `npm run typecheck` before declaring any change done.
 
 ## Rules
 
-1. **Never fake support.** If a gateway does not offer a feature, its capability is `unsupported` and the adapter does not implement it. If it offers it but we have not built it, `not_implemented`. Do not return synthetic success, stub data or a guessed endpoint. Skydo has no API: the adapter never calls Skydo, it automates Skydo's Zoho Books integration or a local ledger (`partial` create/verify/status), and everything else is `unsupported`. Infinity is the same: the adapter never calls Infinity (no public API; its Terms forbid reverse engineering) and automates a Zoho Books bridge or a ledger fed by receiving-account details and/or a QuickLink the merchant created in the dashboard.
+1. **Never fake support.** If a gateway does not offer a feature, its capability is `unsupported` and the adapter does not implement it. If it offers it but we have not built it, `not_implemented`. Do not return synthetic success, stub data or a guessed endpoint. Skydo has no API: the adapter never calls Skydo, it automates Skydo's Zoho Books integration or a local ledger (`partial` create/verify/status), and everything else is `unsupported`. Infinity is the same: the adapter never calls Infinity (no public API; its Terms forbid reverse engineering) and automates a Zoho Books bridge or a ledger fed by receiving-account details and/or a QuickLink the merchant created in the dashboard. Dodo Payments is a Merchant of Record with no ad-hoc prices: the adapter charges a product that exists in Dodo and refuses (before any POST) a product whose listed price is not exactly `amount` (or pay-what-you-want); it never creates products.
 2. **The capability map is the source of truth.** `providers/<id>/capabilities.ts` drives `PaymentsClient` gating, `payments_list_providers`, `payments_recommend_gateway`, the support matrix, and docs. When you implement or remove a feature, update the map in the same change. A method that exists on the adapter while the map says `not_implemented` is still refused by the client.
-3. **Facts come from `docs/research/gateway-api-facts.md` or an official URL.** Cite the URL in a code comment or the capability `notes` for anything non-obvious (endpoints, signature formats, field limits). If you cannot verify a fact, mark it UNVERIFIED in comments and keep it configurable. Do not "fix" a documented algorithm from memory.
+3. **Facts come from `docs/research/gateway-api-facts.md` (Dodo Payments: `docs/research/dodo-api-facts.md`) or an official URL.** Cite the URL in a code comment or the capability `notes` for anything non-obvious (endpoints, signature formats, field limits). If you cannot verify a fact, mark it UNVERIFIED in comments and keep it configurable. Do not "fix" a documented algorithm from memory.
 4. **Keep adapters isolated.** An adapter imports only from `src/core/*`, its own folder and `src/providers/shared/*` (no-API collection code used by Skydo and Infinity). No adapter imports another adapter. Gateway-specific logic never leaks into `client.ts`, `mcp/server.ts` or `codegen/` beyond what the capability map exposes.
 5. **Amounts are integer minor units of the currency at every public boundary** (paise for INR, cents for USD). Conversion to rupees/strings happens inside the adapter via `core/money.ts`. Never use floating-point arithmetic on money.
 6. **Verification is constant-time and on raw bytes.** Use `core/crypto.ts` helpers. Webhook verification takes the raw body string; never re-serialise parsed JSON.

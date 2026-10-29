@@ -4,6 +4,7 @@ import type { ProviderId } from '../core/types.js';
 import { cashfree } from './cashfree/adapter.js';
 import { infinity } from './infinity/adapter.js';
 import { ccavenue } from './ccavenue/adapter.js';
+import { dodo } from './dodo/adapter.js';
 import { payu } from './payu/adapter.js';
 import { paytm } from './paytm/adapter.js';
 import { phonepe } from './phonepe/adapter.js';
@@ -22,6 +23,7 @@ export const PROVIDERS: Record<ProviderId, ProviderModule<any>> = {
   stripe,
   skydo,
   infinity,
+  dodo,
 };
 
 export function allCapabilities(): ProviderCapabilities[] {

@@ -1,4 +1,4 @@
-import type { ProviderCapabilities } from '../core/capabilities.js';
+import { hasShopifyApp, type ProviderCapabilities } from '../core/capabilities.js';
 import type { ProviderId } from '../core/types.js';
 
 export type Need =
@@ -19,6 +19,8 @@ const PRIORS: Partial<Record<ProviderId, Partial<Record<Need, number>>>> = {
   razorpay: { fast_integration: 3, international: 1 },
   cashfree: { fast_integration: 2 },
   stripe: { international: 3, fast_integration: 2 },
+  // Merchant of Record: sells digital products worldwide with tax handled; not for physical goods or services.
+  dodo: { international: 2 },
   skydo: { exporter_collections: 5 },
   // Same use case as Skydo; its Zoho integration is undocumented, so Skydo stays first.
   infinity: { exporter_collections: 3 },
@@ -66,7 +68,7 @@ function scoreNeed(cap: ProviderCapabilities, need: Need): number {
     case 'international':
       return /usd|international|multi|135|100\+/i.test(cap.currencies) ? 2 : 0;
     case 'shopify':
-      return cap.platformPlugins.shopify ? (/not|no official/i.test(cap.platformPlugins.shopify) ? -1 : 2) : -1;
+      return hasShopifyApp(cap) ? 2 : -1;
     case 'woocommerce':
       return cap.platformPlugins.woocommerce ? 2 : 0;
     case 'mobile_sdk':

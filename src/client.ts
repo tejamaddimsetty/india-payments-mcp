@@ -336,6 +336,13 @@ export class PaymentsClient {
       });
     }
     if (provider === 'skydo') this.assertSkydoCurrency(input.currency, input.amount);
+    if (provider === 'dodo' && !input.providerOptions?.productId && !this.config.credentials.dodo?.defaultProductId) {
+      // Checked here too so mock mode fails exactly where the real adapter would.
+      throw new PaymentError('VALIDATION', 'Dodo charges for a product you created in Dodo: pass providerOptions.productId or set DODO_PAYMENTS_DEFAULT_PRODUCT_ID.', {
+        provider: 'dodo',
+        hint: 'Create the product in the Dodo dashboard (Products). For arbitrary amounts, create one pay-what-you-want product (USD/GBP/EUR).',
+      });
+    }
     if (provider === 'infinity') {
       this.assertInfinityCurrency(input.currency);
       // Mock mode has no adapter to check the link: apply the default host rule here too.
@@ -363,7 +370,13 @@ export class PaymentsClient {
   }
 
   async verifyPayment(provider: ProviderId, input: VerifyPaymentInput): Promise<VerifyPaymentResult> {
-    let result = await this.requireFeature(provider, 'verifyPayment', 'verifyPayment').verifyPayment(input);
+    const gw = this.requireFeature(provider, 'verifyPayment', 'verifyPayment');
+    if (provider === 'dodo' && !input.providerOrderId) {
+      // Here too so mock mode refuses exactly what the real adapter refuses: Dodo payments are bound to
+      // the checkout session we created, because anyone can attach our order_ref to a payment of their own.
+      return { valid: false, paid: false, status: 'unknown', verifiedVia: 'status_api', reason: 'Pass providerOrderId: the cks_ checkout session id createPayment returned.' };
+    }
+    let result = await gw.verifyPayment(input);
 
     // Decryption is not authentication (CCAvenue's AES-CBC has no MAC: ciphertext blocks can be
     // spliced between responses). Confirm the outcome with the gateway before calling it paid.
@@ -475,6 +488,10 @@ export class PaymentsClient {
 
   async createSubscription(provider: ProviderId, input: CreateSubscriptionInput) {
     this.assertProviderOptions(provider, 'subscription', input.providerOptions);
+    if (provider === 'dodo' && !input.providerPlanId) {
+      // Here too so mock mode refuses what the real adapter refuses.
+      throw new PaymentError('VALIDATION', 'Dodo subscriptions need providerPlanId: the id of a recurring-price product created in Dodo. Plans cannot be created from `plan`.', { provider: 'dodo' });
+    }
     const gw = this.requireFeature(provider, 'subscriptions', 'createSubscription');
     return this.audited({ action: 'create_subscription', provider, orderRef: input.subscriptionRef }, () => gw.createSubscription(input));
   }

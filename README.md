@@ -1,8 +1,8 @@
 # india-payments-mcp
 
-One MCP server and TypeScript SDK for Indian payment gateways: **Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Skydo and Infinity**. You get one set of tools (`payments_create_payment`, `payments_verify_payment`, `payments_refund`, ...) and one set of types. Amounts are always integers in the minor unit of the currency (paise for INR, cents for USD), every gateway's checkout is described by four shapes, and webhooks normalize to one event model. Adapters handle the per-gateway hashes, encodings and amount formats. The server tells you, and your agent, which features each gateway actually lacks instead of pretending otherwise. It's built for developers wiring up checkout, vibecoders who want an agent to do it, and AI agents that need to check payment status or issue a refund safely.
+One MCP server and TypeScript SDK for Indian payment gateways: **Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe, Dodo Payments, Skydo and Infinity**. You get one set of tools (`payments_create_payment`, `payments_verify_payment`, `payments_refund`, ...) and one set of types. Amounts are always integers in the minor unit of the currency (paise for INR, cents for USD), every gateway's checkout is described by four shapes, and webhooks normalize to one event model. Adapters handle the per-gateway hashes, encodings and amount formats. The server tells you, and your agent, which features each gateway actually lacks instead of pretending otherwise. It's built for developers wiring up checkout, vibecoders who want an agent to do it, and AI agents that need to check payment status or issue a refund safely.
 
-> Status: 0.3.0. Seven gateways have API adapters. Skydo and Infinity have no public API, so their adapters automate their Zoho Books integrations or hand out your receiving-account details (and, for Infinity, a QuickLink) with a ledger ([docs/skydo.md](docs/skydo.md), [docs/infinity.md](docs/infinity.md)). The seven API adapters and Skydo have been through three independent verification rounds against official docs plus adversarial reviews; Infinity reuses Skydo's reviewed Zoho and ledger code and had its own adversarial review (see [Verification status](#verification-status)). Infinity's Zoho integration is not publicly documented, so confirm it with one real invoice. 681 tests pass, but no adapter has been run against a live gateway sandbox yet, and some CCAvenue details remain UNVERIFIED. See [Verification status](#verification-status). Check the per-gateway support level with `payments_get_capabilities` before relying on a feature. See [Disclaimer](#disclaimer).
+> Status: 0.4.0. Eight gateways have API adapters, including Dodo Payments (Merchant of Record for digital products, [docs/dodo.md](docs/dodo.md); new in 0.4.0, with its own independent doc check and adversarial review). Skydo and Infinity have no public API, so their adapters automate their Zoho Books integrations or hand out your receiving-account details (and, for Infinity, a QuickLink) with a ledger ([docs/skydo.md](docs/skydo.md), [docs/infinity.md](docs/infinity.md)). The seven API adapters and Skydo have been through three independent verification rounds against official docs plus adversarial reviews; Infinity reuses Skydo's reviewed Zoho and ledger code and had its own adversarial review (see [Verification status](#verification-status)). Infinity's Zoho integration is not publicly documented, so confirm it with one real invoice. 759 tests pass, but no adapter has been run against a live gateway sandbox yet, and some CCAvenue details remain UNVERIFIED. See [Verification status](#verification-status). Check the per-gateway support level with `payments_get_capabilities` before relying on a feature. See [Disclaimer](#disclaimer).
 
 ---
 
@@ -56,20 +56,20 @@ npx india-payments-mcp doctor
 
 Generated from each adapter's `src/providers/<id>/capabilities.ts`. Unsupported features fail with `UNSUPPORTED` and Planned ones with `NOT_IMPLEMENTED`, before any network call.
 
-| Feature | Razorpay | PayU India | Cashfree Payments | CCAvenue | Paytm Payment Gateway | PhonePe Payment Gateway | Stripe (India) | Skydo | Infinity |
-|---|---|---|---|---|---|---|---|---|---|
-| createPayment | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Partial | Partial |
-| verifyPayment | Yes | Yes | Yes | Yes | Yes | Partial | Yes | Partial | Partial |
-| paymentStatus | Yes | Yes | Yes | Partial | Yes | Yes | Yes | Partial | Partial |
-| refund | Yes | Yes | Yes | Partial | Yes | Yes | Yes | No | No |
-| refundStatus | Yes | Yes | Yes | Planned | Yes | Yes | Yes | No | No |
-| webhooks | Yes | Partial | Yes | Partial | Partial | Partial | Yes | No | No |
-| customers | Yes | No | Planned | No | No | No | Yes | No | No |
-| subscriptions | Yes | Planned | Planned | Planned | Planned | Planned | Partial | No | No |
-| settlements | Yes | Planned | Planned | Planned | Planned | Planned | Partial | No | No |
-| payouts | Planned | Planned | Planned | Planned | Planned | No | Planned | No | No |
-| paymentLinks | Planned | Planned | Planned | Planned | Planned | Planned | Planned | No | No |
-| checkout | js_sdk, redirect | form_post | js_sdk | form_post | js_sdk, form_post | redirect | redirect, js_sdk | manual | manual |
+| Feature | Razorpay | PayU India | Cashfree Payments | CCAvenue | Paytm Payment Gateway | PhonePe Payment Gateway | Stripe (India) | Skydo | Infinity | Dodo Payments |
+|---|---|---|---|---|---|---|---|---|---|---|
+| createPayment | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Partial | Partial | Yes |
+| verifyPayment | Yes | Yes | Yes | Yes | Yes | Partial | Yes | Partial | Partial | Yes |
+| paymentStatus | Yes | Yes | Yes | Partial | Yes | Yes | Yes | Partial | Partial | Yes |
+| refund | Yes | Yes | Yes | Partial | Yes | Yes | Yes | No | No | Partial |
+| refundStatus | Yes | Yes | Yes | Planned | Yes | Yes | Yes | No | No | Yes |
+| webhooks | Yes | Partial | Yes | Partial | Partial | Partial | Yes | No | No | Yes |
+| customers | Yes | No | Planned | No | No | No | Yes | No | No | Yes |
+| subscriptions | Yes | Planned | Planned | Planned | Planned | Planned | Partial | No | No | Partial |
+| settlements | Yes | Planned | Planned | Planned | Planned | Planned | Partial | No | No | Partial |
+| payouts | Planned | Planned | Planned | Planned | Planned | No | Planned | No | No | No |
+| paymentLinks | Planned | Planned | Planned | Planned | Planned | Planned | Planned | No | No | Planned |
+| checkout | js_sdk, redirect | form_post | js_sdk | form_post | js_sdk, form_post | redirect | redirect, js_sdk | manual | manual | redirect |
 
 Yes = implemented here. Partial = implemented with caveats (see capability notes). Planned = the gateway offers it, this project does not yet. No = the gateway does not offer it.
 
@@ -199,6 +199,18 @@ Skydo payments are foreign currency only (INR is rejected), at least USD 50 (or 
 
 ---
 
+## Dodo Payments
+
+Dodo Payments is a **Merchant of Record** for digital products (SaaS, AI tools, apps, templates, e-books): Dodo is the legal seller and handles VAT, GST and sales tax worldwide. Indian buyers pay with UPI, RuPay or cards; payouts are in USD, GBP or EUR. Physical goods and human-delivered services are not allowed.
+
+- **Products first.** Dodo has no ad-hoc prices: pass `provider_options.productId` or set `DODO_PAYMENTS_DEFAULT_PRODUCT_ID`. The adapter reads the product and refuses one whose fixed price differs from `amount`; a pay-what-you-want product (USD/GBP/EUR) takes any amount above its minimum.
+- **Hosted checkout** (`redirect`). The return to `return_url` is unsigned, so `payments_verify_payment` re-reads the payment. It needs `provider_order_id` (the checkout session you created), then checks `order_ref`, amount and currency. Tax Dodo adds on top of a tax-exclusive price still matches. Discount codes and currency switching are turned off on our sessions, and another currency never counts as paid.
+- **Standard Webhooks**, refunds (with a lookup by `refund_ref` first, since Dodo has no idempotency key), customers, subscriptions for recurring products, and payouts as settlements.
+
+Dodo also ships its own MCP server (`dodopayments-mcp`); this one is the cross-gateway interface. Setup, India notes and troubleshooting: **[docs/dodo.md](docs/dodo.md)**.
+
+---
+
 ## Infinity
 
 Infinity (infinityapp.in; cross-border collections for freelancers, agencies and exporters) publishes **no developer API docs or webhooks**. Its Terms mention an API, but nothing is public, and they forbid reverse engineering or incorporating the Services into other systems, so this project never contacts Infinity. The Infinity adapter offers three modes:
@@ -213,7 +225,8 @@ Without Zoho, the payment is tracked in a ledger and an admin records the receip
 
 ## Verification status
 
-- Three independent verification rounds against official docs, plus adversarial reviews of the money-safety rules and the Skydo bridge; 681 tests. The reports, with the doc URL behind each check and the fixes they caused, are in [docs/research/verification](docs/research/verification) (round 3: [round3-project.md](docs/research/verification/round3-project.md), [round3-skydo.md](docs/research/verification/round3-skydo.md)); the summary is in [docs/design-review.md](docs/design-review.md#round-3). The Skydo API search is in [skydo-api-search.md](docs/research/verification/skydo-api-search.md).
+- Three independent verification rounds against official docs, plus adversarial reviews of the money-safety rules and the Skydo bridge; 759 tests. The reports, with the doc URL behind each check and the fixes they caused, are in [docs/research/verification](docs/research/verification) (round 3: [round3-project.md](docs/research/verification/round3-project.md), [round3-skydo.md](docs/research/verification/round3-skydo.md)); the summary is in [docs/design-review.md](docs/design-review.md#round-3). The Skydo API search is in [skydo-api-search.md](docs/research/verification/skydo-api-search.md).
+- Dodo Payments: facts from the official docs and per-endpoint OpenAPI blocks ([dodo-api-facts.md](docs/research/dodo-api-facts.md)), an independent line-by-line check of the adapter against those docs ([dodo-doc-verification.md](docs/research/verification/dodo-doc-verification.md)) and an adversarial review ([dodo-review.md](docs/research/verification/dodo-review.md)). The webhook verifier matches the Standard Webhooks reference vector and the official `standardwebhooks` library.
 - Infinity: sources for every fact used, and the API search, are in [infinity-api-search.md](docs/research/verification/infinity-api-search.md). Its Zoho and ledger logic is the shared Skydo code (`src/providers/shared/`); a before/after comparison showed Skydo's results, errors and Zoho requests are unchanged by the move. Infinity's own QuickLink, gate and mode rules had a separate adversarial review ([infinity-review.md](docs/research/verification/infinity-review.md)); its one medium and nine low findings are fixed, with regression tests.
 - **Not yet run against live gateway sandboxes.** Tests use recorded request/response shapes from the docs. `npm run sandbox:smoke` (see `scripts/sandbox-smoke.ts`) creates small unpaid orders against the sandboxes of the gateways you have test keys for; results from contributors are welcome.
 - Facts the docs do not settle are marked in the capability notes (`UNVERIFIED`, "confirm in sandbox"). CCAvenue publishes no public API reference, so its status and refund calls rely on integration kits and third-party implementations.
@@ -290,6 +303,7 @@ The full layout is in [docs/architecture.md](docs/architecture.md#m-repository-s
 | [gateway-matrix.md](docs/gateway-matrix.md) | Per-gateway checkout, units, signatures, webhooks, refunds, constraints, plugins, onboarding |
 | [payloads.md](docs/payloads.md) | Example request/response for every tool, including errors |
 | [skydo.md](docs/skydo.md) | Skydo: status, Zoho Books bridge and ledger setup, flow, limits, troubleshooting, FAQ |
+| [dodo.md](docs/dodo.md) | Dodo Payments: Merchant of Record fit, products-first setup, tax and currency rules, refunds, India notes, troubleshooting |
 | [infinity.md](docs/infinity.md) | Infinity: status, Zoho Books bridge, bank transfer and QuickLink setup, flow, limits, troubleshooting |
 | [webhooks.md](docs/webhooks.md) | Verification per gateway, normalized events, dedupe, ordering, raw-body pitfalls |
 | [security.md](docs/security.md) | Secrets, live rails, audit, PCI-DSS scope, RBI rules, agent threat model |
@@ -321,7 +335,7 @@ PAYMENTS_MODE=mock npm run inspect   # MCP Inspector against the local server
 
 ## Disclaimer
 
-- This project is **not affiliated with, endorsed by, or sponsored by** Razorpay, PayU, Cashfree, CCAvenue (Infibeam Avenues), Paytm (One97 / Paytm Payments Services), PhonePe, Stripe, Skydo, Infinity (Scalifi Wealth), Shopify or any other company named here. All trademarks belong to their owners.
+- This project is **not affiliated with, endorsed by, or sponsored by** Razorpay, PayU, Cashfree, CCAvenue (Infibeam Avenues), Paytm (One97 / Paytm Payments Services), PhonePe, Stripe, Dodo Payments, Skydo, Infinity (Scalifi Wealth), Shopify or any other company named here. All trademarks belong to their owners.
 - This is **not financial, legal, tax or compliance advice**. You remain responsible for PCI-DSS, RBI and other regulatory obligations, and for your agreements with each gateway.
 - Gateway behaviour changes without notice. **Verify every flow against the gateway's official documentation and in its sandbox before going live.** Facts in this repo carry a `lastVerified` date and VERIFIED / PARTIAL / UNVERIFIED tags in [docs/research/gateway-api-facts.md](docs/research/gateway-api-facts.md); the doc-by-doc checks are in [docs/research/verification](docs/research/verification).
 - The software is provided "as is" under the [MIT License](LICENSE), without warranty of any kind.

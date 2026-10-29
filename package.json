@@ -1,6 +1,6 @@
 {
   "name": "india-payments-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "One MCP server and TypeScript SDK for every major Indian payment gateway: Razorpay, PayU, Cashfree, CCAvenue, Paytm, PhonePe, Stripe and Skydo.",
   "license": "MIT",
   "type": "module",
@@ -69,6 +69,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "standardwebhooks": "^1.1.1",
     "tsx": "^4.20.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"

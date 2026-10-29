@@ -1,4 +1,4 @@
-import type { ProviderCapabilities } from '../../core/capabilities.js';
+import { hasShopifyApp, type ProviderCapabilities } from '../../core/capabilities.js';
 import { profileFor } from './profiles.js';
 import { has, lines, oneLine, type TemplateContext } from './shared.js';
 
@@ -152,7 +152,7 @@ export function mobileGuide(ctx: TemplateContext, platform: 'react-native' | 'fl
 
 export function shopifyGuide(ctx: TemplateContext): string {
   const { cap } = ctx;
-  const plugin = cap.platformPlugins.shopify;
+  const plugin = hasShopifyApp(cap) ? cap.platformPlugins.shopify : undefined;
   return lines(
     `# ${cap.displayName} on Shopify`,
     ``,

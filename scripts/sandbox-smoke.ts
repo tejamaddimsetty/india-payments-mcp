@@ -69,15 +69,16 @@ async function smoke(provider: ProviderId) {
   });
 
   await check(provider, 'create payment', async () => {
+    if (provider === 'dodo' && !process.env.DODO_PAYMENTS_DEFAULT_PRODUCT_ID) return { skip: 'set DODO_PAYMENTS_DEFAULT_PRODUCT_ID (Dodo has no ad-hoc prices)' };
     const r = await client.createPayment(provider, {
       orderRef,
-      amount: 100,
+      ...smokeAmount(provider),
       description: 'india-payments-mcp sandbox smoke test',
       customer: { name: 'Smoke Test', email: 'smoke@example.com', phone: '9999999999' },
       returnUrl: 'https://example.com/payments/return',
     });
     providerOrderId = r.providerOrderId;
-    expect(r.amount === 100, `amount came back as ${r.amount}`);
+    expect(r.amount === smokeAmount(provider).amount, `amount came back as ${r.amount}`);
     return `${orderRef} -> ${r.providerOrderId}, checkout=${r.checkout.type}`;
   });
 
@@ -85,7 +86,7 @@ async function smoke(provider: ProviderId) {
     if (!providerOrderId) return { skip: 'create failed' };
     const again = await client.createPayment(provider, {
       orderRef,
-      amount: 100,
+      ...smokeAmount(provider),
       description: 'india-payments-mcp sandbox smoke test',
       customer: { name: 'Smoke Test', email: 'smoke@example.com', phone: '9999999999' },
       returnUrl: 'https://example.com/payments/return',
@@ -152,6 +153,15 @@ async function smoke(provider: ProviderId) {
   }
 
   console.log(`  ${provider}: unpaid test order ${orderRef}${providerOrderId ? ` (${providerOrderId})` : ''}`);
+}
+
+/**
+ * Rs 1.00 everywhere, except Dodo: it charges a product, so use that product's price
+ * (SMOKE_DODO_AMOUNT in minor units, SMOKE_DODO_CURRENCY; defaults fit a USD pay-what-you-want product).
+ */
+function smokeAmount(provider: ProviderId): { amount: number; currency?: string } {
+  if (provider !== 'dodo') return { amount: 100 };
+  return { amount: Number(process.env.SMOKE_DODO_AMOUNT ?? 100), currency: process.env.SMOKE_DODO_CURRENCY ?? 'USD' };
 }
 
 async function smokePaid(spec: string) {

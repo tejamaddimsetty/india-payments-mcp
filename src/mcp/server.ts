@@ -336,6 +336,7 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
         currency: z.string().length(3).optional(),
         provider_payment_id: z.string().optional(),
         refund_ref: ref.optional(),
+        provider_order_id: z.string().optional().describe('The stored checkout session id (Dodo cks_...): generated Dodo handlers ignore events for another session'),
         target_url: z.string().url().optional().describe('If given, the response includes a ready-to-run curl command'),
       },
       annotations: { readOnlyHint: true },
@@ -349,6 +350,7 @@ export function createMcpServer(client: PaymentsClient = new PaymentsClient({ ac
           currency: a.currency,
           providerPaymentId: a.provider_payment_id,
           refundRef: a.refund_ref,
+          providerOrderId: a.provider_order_id,
         });
         const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
         const curl = a.target_url

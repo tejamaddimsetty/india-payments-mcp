@@ -65,6 +65,12 @@ export interface ProviderCapabilities {
   lastVerified: string;
 }
 
+/** platformPlugins.shopify holds a note either way; "No ... app" / "Not usable ..." means there is none. */
+export function hasShopifyApp(cap: Pick<ProviderCapabilities, 'platformPlugins'>): boolean {
+  const note = cap.platformPlugins.shopify?.trim();
+  return !!note && !/^(no|not)\b/i.test(note);
+}
+
 export function featureRow(
   support: SupportLevel,
   notes?: string,

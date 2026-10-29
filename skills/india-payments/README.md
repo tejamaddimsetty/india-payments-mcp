@@ -6,7 +6,7 @@ A Claude Agent Skill that makes an agent build Indian payment integrations the w
 skills/india-payments/
   SKILL.md                                   # the operating procedure (loaded when triggered)
   references/
-    razorpay.md payu.md cashfree.md ccavenue.md paytm.md phonepe.md stripe.md skydo.md infinity.md
+    razorpay.md payu.md cashfree.md ccavenue.md paytm.md phonepe.md stripe.md dodo.md skydo.md infinity.md
     payment-module-architecture.md           # tables, state machine, reconciliation, idempotency
     platforms.md                             # Shopify, WooCommerce, Next.js, Django, Laravel, mobile
 ```
@@ -72,4 +72,4 @@ Tools the skill uses: `payments_recommend_gateway`, `payments_get_capabilities`,
 
 ## Accuracy
 
-Gateway facts come from `docs/research/gateway-api-facts.md` (researched 2026-10-28), corrected by the round-1 line-by-line checks of every adapter against the official docs in `docs/research/verification/` (2026-10-29). Each fact is labelled VERIFIED, PARTIAL or UNVERIFIED. Nothing has yet been run against live gateway sandboxes. Sandbox test cards/UPI ids were not re-fetched during that research and are marked UNVERIFIED with the official page to check. Report corrections as issues with the official doc URL.
+Gateway facts come from `docs/research/gateway-api-facts.md` (researched 2026-10-28), corrected by the round-1 line-by-line checks of every adapter against the official docs in `docs/research/verification/` (2026-10-29). Each fact is labelled VERIFIED, PARTIAL or UNVERIFIED. Nothing has yet been run against live gateway sandboxes. Sandbox test cards/UPI ids were not re-fetched during that research and are marked UNVERIFIED with the official page to check. Dodo Payments facts come from `docs/research/dodo-api-facts.md` (official Dodo docs, 2026-10-29); the Dodo adapter has been checked against those docs, fixtures and the official `standardwebhooks` library only, not yet against Dodo's test mode. Report corrections as issues with the official doc URL.

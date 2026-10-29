@@ -19,6 +19,7 @@ export const PROVIDER_IDS = [
   'stripe',
   'skydo',
   'infinity',
+  'dodo',
 ] as const;
 
 export type ProviderId = (typeof PROVIDER_IDS)[number];
@@ -357,4 +358,6 @@ export interface SimulateWebhookInput {
   currency?: string;
   providerPaymentId?: string;
   refundRef?: string;
+  /** The stored checkout session/order id, for gateways whose webhooks name it (Dodo: cks_...). */
+  providerOrderId?: string;
 }

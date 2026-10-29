@@ -15,6 +15,7 @@
 | CCAvenue | Historically listed in admin; current listing unconfirmed | UNVERIFIED |
 | Paytm | No official app found | UNVERIFIED |
 | Stripe | Not usable for India stores | PARTIAL |
+| Dodo Payments | None found (no Dodo Shopify payments app) | UNVERIFIED |
 | Skydo | None | VERIFIED-ABSENT |
 | Infinity | None found (no Infinity Shopify payments app) | UNVERIFIED |
 
