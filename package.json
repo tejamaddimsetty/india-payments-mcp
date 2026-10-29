@@ -15,7 +15,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "india-payments-mcp": "./dist/cli.js"
+    "india-payments-mcp": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -57,7 +57,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/tejamaddimsetty/india-payments-mcp.git"
+    "url": "git+https://github.com/tejamaddimsetty/india-payments-mcp.git"
   },
   "homepage": "https://github.com/tejamaddimsetty/india-payments-mcp#readme",
   "bugs": {
